@@ -28,6 +28,7 @@ import {
   DATA_PROPERTY_LINK_STRENGTH,
   DATA_PROPERTY_MIN_WIDTH,
   getEdgeDirectionPhase,
+  getEdgeLineStyle,
   LABEL_ANCHOR_LINK_STRENGTH,
   LABEL_ANCHOR_RESTORE_STRENGTH,
   LINK_DISTANCE,
@@ -64,16 +65,18 @@ import {
   syncDataPropertyNodes,
 } from '../dataPropertyGeometry'
 import { Minimap } from './Minimap'
+import { ClassDragTool } from './ClassDragTool'
 
 interface OntologyCanvasProps {
   classes: OntologyClass[]
   edges: OntologyEdge[]
   dataProperties: OntologyDataProperty[]
   selection: Selection | null
+  selectedClassIds: ReadonlySet<string>
   editingLabel: Selection | null
   editingDataProperty: EditingDataProperty | null
   onCreateAt: (x: number, y: number) => void
-  onSelectClass: (id: string) => void
+  onSelectClass: (id: string, additive: boolean) => void
   onSelectClassDataTab: (id: string) => void
   onSelectAndEditClass: (id: string) => void
   onSelectEdge: (id: string) => void
@@ -109,6 +112,7 @@ export function OntologyCanvas({
   edges,
   dataProperties,
   selection,
+  selectedClassIds,
   editingLabel,
   editingDataProperty,
   onCreateAt,
@@ -611,12 +615,20 @@ export function OntologyCanvas({
     if (kept.length !== prev.length) changed = true
 
     const nodes = [...kept]
+    const newNodeIds: string[] = []
+    const pinForWarmLayout = !warmedRef.current
+
     for (const c of classes) {
       if (!prevIds.has(c.id)) {
         const x = c.x ?? 0
         const y = c.y ?? 0
-        pinnedRef.current.add(c.id)
-        nodes.push({ id: c.id, label: c.label, x, y, fx: x, fy: y, vx: 0, vy: 0 })
+        if (pinForWarmLayout) {
+          pinnedRef.current.add(c.id)
+          nodes.push({ id: c.id, label: c.label, x, y, fx: x, fy: y, vx: 0, vy: 0 })
+        } else {
+          nodes.push({ id: c.id, label: c.label, x, y, vx: 0, vy: 0 })
+        }
+        newNodeIds.push(c.id)
         changed = true
       }
     }
@@ -638,8 +650,10 @@ export function OntologyCanvas({
       if (!warmedRef.current && nodes.length > 0) {
         warmLayout(sim, Math.min(520, 120 + nodes.length * 12))
         warmedRef.current = true
+        releasePinnedNodes(newNodeIds, nodes, pinnedRef.current)
+        sim.alpha(0.22).restart()
       } else if (newCount > 0) {
-        sim.alpha(Math.min(0.16, 0.07 + newCount * 0.01)).restart()
+        sim.alpha(Math.min(0.22, 0.1 + newCount * 0.02)).restart()
       }
 
       const nodeSel = nodeLayer.selectAll<SVGGElement, SimClass>('g.node').data(nodes, (d) => d.id)
@@ -655,20 +669,17 @@ export function OntologyCanvas({
           if (ev.button !== 0) return
           if ((ev.target as Element).closest('.link-handle')) return
           ev.stopPropagation()
-          nodeLayer
-            .selectAll<SVGGElement, SimClass>('g.node')
-            .classed('selected', (n) => n.id === d.id)
           edgeLabelLayerRef.current
             ?.selectAll<SVGGElement, SimLink>('g.edge-label')
             .classed('selected', false)
-          callbacksRef.current.onSelectClass(d.id)
+          callbacksRef.current.onSelectClass(
+            d.id,
+            ev.shiftKey || ev.ctrlKey || ev.metaKey,
+          )
         })
         .on('dblclick', (ev, d) => {
           if ((ev.target as Element).closest('.link-handle')) return
           ev.stopPropagation()
-          nodeLayer
-            .selectAll<SVGGElement, SimClass>('g.node')
-            .classed('selected', (n) => n.id === d.id)
           edgeLabelLayerRef.current
             ?.selectAll<SVGGElement, SimLink>('g.edge-label')
             .classed('selected', false)
@@ -759,6 +770,7 @@ export function OntologyCanvas({
         existing.sourceId = e.sourceId
         existing.targetId = e.targetId
         existing.directionPhase = e.directionPhase ?? 0
+        existing.lineStyle = e.lineStyle
         return existing
       }
       return {
@@ -770,6 +782,7 @@ export function OntologyCanvas({
         target: e.targetId,
         bidirectional: e.bidirectional ?? false,
         directionPhase: e.directionPhase ?? 0,
+        lineStyle: e.lineStyle,
       }
     })
 
@@ -858,11 +871,7 @@ export function OntologyCanvas({
     linkSel
       .merge(linkEnter)
       .select('path.link')
-      .attr('class', (d) => {
-        if (isSelfLink(d)) return d.bidirectional ? 'link link-self link-bidir' : 'link link-self'
-        if (d.bidirectional) return 'link link-bidir'
-        return 'link'
-      })
+      .attr('class', (d) => linkPathClass(d))
       .attr('marker-end', 'url(#arrow)')
       .attr('marker-start', (d) => (d.bidirectional ? 'url(#arrow-start)' : null))
 
@@ -929,7 +938,7 @@ export function OntologyCanvas({
     if (changed) {
       sim.alpha(Math.min(0.32, 0.14 + links.filter((l) => !prevIds.has(l.id)).length * 0.08)).restart()
     }
-  }, [edges.map((e) => `${e.id}:${e.sourceId}:${e.targetId}:${e.bidirectional ? 1 : 0}:${e.directionPhase ?? 0}`).join('|')])
+  }, [edges.map((e) => `${e.id}:${e.sourceId}:${e.targetId}:${e.bidirectional ? 1 : 0}:${e.directionPhase ?? 0}:${e.lineStyle ?? 'solid'}`).join('|')])
 
   useEffect(() => {
     const sim = simRef.current
@@ -999,9 +1008,6 @@ export function OntologyCanvas({
     nodeSel.exit().remove()
 
     const selectDataPropertyClass = (d: SimDataProperty) => {
-      nodeLayerRef.current
-        ?.selectAll<SVGGElement, SimClass>('g.node')
-        .classed('selected', (n) => n.id === d.classId)
       edgeLabelLayerRef.current
         ?.selectAll<SVGGElement, SimLink>('g.edge-label')
         .classed('selected', false)
@@ -1120,7 +1126,6 @@ export function OntologyCanvas({
     const edgeLabelById = new Map(edges.map((e) => [e.id, e.label]))
     const dataPropById = new Map(dataProperties.map((p) => [p.id, p]))
 
-    const selectedClassId = selection?.kind === 'class' ? selection.id : null
     const selectedEdgeId = selection?.kind === 'edge' ? selection.id : null
     const editingClassId = editingLabel?.kind === 'class' ? editingLabel.id : null
     const editingEdgeId = editingLabel?.kind === 'edge' ? editingLabel.id : null
@@ -1129,7 +1134,7 @@ export function OntologyCanvas({
 
     nodeLayer
       .selectAll<SVGGElement, SimClass>('g.node')
-      .classed('selected', (d) => d.id === selectedClassId)
+      .classed('selected', (d) => selectedClassIds.has(d.id))
       .classed('editing-label', (d) => d.id === editingClassId)
 
     nodeLayer.selectAll<SVGGElement, SimClass>('g.node').each(function (d) {
@@ -1165,7 +1170,7 @@ export function OntologyCanvas({
         .selectAll<SVGGElement, SimDataPropertyLink>('g.data-prop-edge-label')
         .classed('selected', (d) => {
           const prop = dataPropById.get(d.propertyId)
-          return prop?.classId === selectedClassId
+          return prop ? selectedClassIds.has(prop.classId) : false
         })
         .classed(
           'editing-label',
@@ -1182,7 +1187,7 @@ export function OntologyCanvas({
     if (dataPropNodeLayer) {
       dataPropNodeLayer
         .selectAll<SVGGElement, SimDataProperty>('g.data-prop-node')
-        .classed('selected', (d) => d.classId === selectedClassId)
+        .classed('selected', (d) => selectedClassIds.has(d.classId))
         .classed(
           'editing-label',
           (d) => editingDataPropField === 'datatype' && d.propertyId === editingDataPropId,
@@ -1199,22 +1204,28 @@ export function OntologyCanvas({
           )
         })
     }
-  }, [selection, editingLabel, editingDataProperty, classes, edges, dataProperties])
+  }, [
+    selection,
+    [...selectedClassIds].sort().join('|'),
+    editingLabel,
+    editingDataProperty,
+    classes,
+    edges,
+    dataProperties,
+  ])
 
   return (
     <div className="canvas-wrap" ref={wrapRef}>
       <div className="canvas-toolbar">
-        <div className="canvas-title">
-          <span className="dot" />
-          Ontology canvas · {classes.length} {classes.length === 1 ? 'class' : 'classes'}
-          {edges.length > 0 && ` · ${edges.length} ${edges.length === 1 ? 'edge' : 'edges'}`}
-        </div>
         <div className="canvas-hint">
-          Scroll to zoom · Double-click to add · Drag handle to connect · Drag parallel & loop labels
+          <strong>Zoom and navigate</strong> by scrolling · <strong>Add a class</strong> by double-clicking the
+          canvas or dragging from the tool below · <strong>Connect a node</strong> by dragging its node handle
         </div>
       </div>
 
       <svg ref={svgRef} className="graph-canvas" aria-label="Ontology canvas" />
+
+      <ClassDragTool wrapRef={wrapRef} gRootRef={gRootRef} onCreateAt={onCreateAt} />
 
       <Minimap
         wrapRef={wrapRef}
@@ -1291,6 +1302,14 @@ function onHandleZoneLeave(this: SVGCircleElement, ev: PointerEvent) {
   setHandleHot(parent, false)
 }
 
+function linkPathClass(link: SimLink) {
+  const classes = ['link']
+  if (isSelfLink(link)) classes.push('link-self')
+  if (link.bidirectional) classes.push('link-bidir')
+  if (getEdgeLineStyle(link) === 'dashed') classes.push('link-dashed')
+  return classes.join(' ')
+}
+
 function forceLabelRestore(
   getLinks: () => SimLink[],
   getLabelAnchors: () => SimLabelAnchor[],
@@ -1325,6 +1344,17 @@ function labelDragTarget(
   if (!isDraggableEdgeLabel(link)) return undefined
   if (isSelfLink(link)) return loopAnchors.find((a) => a.edgeId === link.id)
   return labelAnchors.find((a) => a.edgeId === link.id)
+}
+
+function releasePinnedNodes(ids: Iterable<string>, nodes: SimClass[], pinned: Set<string>) {
+  for (const id of ids) {
+    const node = nodes.find((n) => n.id === id)
+    if (node) {
+      node.fx = null
+      node.fy = null
+    }
+    pinned.delete(id)
+  }
 }
 
 function syncSimulationNodes(

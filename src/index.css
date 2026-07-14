@@ -1,25 +1,59 @@
 :root {
-  --bg: #0b1020;
-  --bg-2: #0f1630;
-  --panel: #121a36;
-  --panel-2: #192247;
-  --border: #1f2a53;
-  --text: #e6ecff;
-  --muted: #9aa7d0;
-  --accent: #5b8cff;
-  --accent-2: #7cc4ff;
+  /* UI — Openaxon zinc + cyan */
+  --bg: #09090b;
+  --bg-2: #18181b;
+  --panel: #18181b;
+  --panel-2: #27272a;
+  --border: #3f3f46;
+  --text: #fafafa;
+  --muted: #a1a1aa;
+  --accent: #22d3ee;
+  --accent-2: #06b6d4;
+  --accent-subtle: rgba(6, 182, 212, 0.12);
+  --accent-subtle-hover: rgba(6, 182, 212, 0.08);
+  --accent-muted: rgba(6, 182, 212, 0.15);
+  --accent-strong: rgba(6, 182, 212, 0.14);
+  --accent-border-soft: rgba(6, 182, 212, 0.2);
+  --accent-border: rgba(6, 182, 212, 0.35);
+  --accent-border-strong: rgba(6, 182, 212, 0.45);
+  --accent-focus: rgba(6, 182, 212, 0.18);
+  --accent-focus-soft: rgba(6, 182, 212, 0.14);
+  --accent-active: rgba(6, 182, 212, 0.22);
+  --accent-panel: rgba(6, 182, 212, 0.24);
+  --accent-shadow: rgba(6, 182, 212, 0.12);
+
+  /* Canvas graph — original blue palette (unchanged) */
+  --canvas-accent: #5b8cff;
+  --canvas-accent-2: #7cc4ff;
+  --canvas-accent-subtle: rgba(91, 140, 255, 0.12);
+  --canvas-accent-strong: rgba(91, 140, 255, 0.2);
+  --canvas-accent-border: rgba(91, 140, 255, 0.35);
+  --canvas-accent-border-strong: rgba(91, 140, 255, 0.55);
+  --canvas-accent-glow: rgba(91, 140, 255, 0.45);
+  --canvas-accent-glow-strong: rgba(91, 140, 255, 0.85);
+  --canvas-accent-2-glow: rgba(124, 196, 255, 0.45);
+  --canvas-accent-2-glow-strong: rgba(124, 196, 255, 0.65);
+  --canvas-accent-2-glow-soft: rgba(124, 196, 255, 0.75);
+
   --danger: #f87171;
   --ok: #34d399;
   --sidebar-w: 260px;
+  --sidebar-left-w: 195px;
+  --sidebar-right-w: 286px;
   --sidebar-collapsed: 44px;
-  --topbar-bg: rgba(10, 14, 32, 0.6);
-  --canvas-bg: radial-gradient(1000px 600px at 20% 0%, rgba(91, 140, 255, 0.1), transparent 60%),
-    linear-gradient(180deg, #0a1130 0%, #060a1c 100%);
-  --toolbar-bg: rgba(10, 14, 32, 0.65);
-  --input-bg: rgba(7, 10, 24, 0.5);
-  --minimap-bg: rgba(10, 14, 32, 0.85);
-  --minimap-canvas-bg: rgba(6, 10, 28, 0.6);
-  --modal-backdrop: rgba(4, 6, 16, 0.72);
+  --sidebar-bg: #18181b;
+  --sidebar-hover-bg: rgba(255, 255, 255, 0.1);
+  --sidebar-active-bg: #f4f4f5;
+  --sidebar-active-border: transparent;
+  --sidebar-active-text: #18181b;
+  --topbar-bg: rgba(9, 9, 11, 0.8);
+  --topbar-border: rgba(39, 39, 42, 0.8);
+  --canvas-bg: #09090b;
+  --toolbar-bg: rgba(24, 24, 27, 0.92);
+  --input-bg: #27272a;
+  --minimap-bg: rgba(24, 24, 27, 0.95);
+  --minimap-canvas-bg: var(--canvas-bg);
+  --modal-backdrop: rgba(0, 0, 0, 0.55);
   --node-label-fill: #e6ecff;
   --node-label-stroke: rgba(0, 0, 0, 0.65);
   --entity-core-stroke: rgba(0, 0, 0, 0.35);
@@ -39,10 +73,7 @@ body,
 body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   color: var(--text);
-  background:
-    radial-gradient(1200px 600px at 10% -10%, rgba(91, 140, 255, 0.12), transparent 60%),
-    radial-gradient(1000px 500px at 90% 110%, rgba(124, 196, 255, 0.08), transparent 60%),
-    linear-gradient(180deg, #070a1a 0%, #0b1020 100%);
+  background: var(--bg);
   min-height: 100%;
   overflow: hidden;
 }
@@ -53,43 +84,61 @@ input {
 }
 
 /* =========================================================================
- * LIGHT THEME — toggle via data-theme="light" on <html> (openaxon pattern)
+ * LIGHT THEME — toggle via data-theme="light" on <html> (Openaxon pattern)
  * ========================================================================= */
 :root[data-theme='light'] {
-  --bg: #f4f7ff;
-  --bg-2: #e7ecfa;
+  --bg: #fafafa;
+  --bg-2: #f4f4f5;
   --panel: #ffffff;
-  --panel-2: #f4f7ff;
-  --border: #d7deee;
-  --text: #0b1020;
-  --muted: #5c6a92;
-  --accent: #3b6bff;
-  --accent-2: #2451d6;
+  --panel-2: #f4f4f5;
+  --border: #e4e4e7;
+  --text: #18181b;
+  --muted: #71717a;
+  --accent: #0891b2;
+  --accent-2: #0e7490;
+  --accent-subtle: rgba(8, 145, 178, 0.1);
+  --accent-subtle-hover: rgba(8, 145, 178, 0.06);
+  --accent-muted: rgba(8, 145, 178, 0.12);
+  --accent-strong: rgba(8, 145, 178, 0.12);
+  --accent-border-soft: rgba(8, 145, 178, 0.2);
+  --accent-border: rgba(8, 145, 178, 0.28);
+  --accent-border-strong: rgba(8, 145, 178, 0.35);
+  --accent-focus: rgba(8, 145, 178, 0.18);
+  --accent-focus-soft: rgba(8, 145, 178, 0.14);
+  --accent-active: rgba(8, 145, 178, 0.16);
+  --accent-panel: rgba(8, 145, 178, 0.2);
+  --accent-shadow: rgba(8, 145, 178, 0.08);
+
+  --canvas-accent: #5b8cff;
+  --canvas-accent-2: #3b6bff;
+
   --danger: #dc2626;
-  --topbar-bg: rgba(255, 255, 255, 0.75);
-  --canvas-bg: radial-gradient(1000px 600px at 20% 0%, rgba(91, 140, 255, 0.12), transparent 60%),
-    linear-gradient(180deg, #f5f8ff 0%, #e9efff 100%);
-  --toolbar-bg: rgba(255, 255, 255, 0.88);
+  --sidebar-bg: #f4f4f5;
+  --sidebar-hover-bg: #e4e4e7;
+  --sidebar-active-bg: #e4e4e7;
+  --sidebar-active-border: transparent;
+  --sidebar-active-text: #18181b;
+  --topbar-bg: rgba(250, 250, 250, 0.8);
+  --topbar-border: rgba(228, 228, 231, 0.8);
+  --canvas-bg: #fafafa;
+  --toolbar-bg: rgba(255, 255, 255, 0.92);
   --input-bg: #ffffff;
-  --minimap-bg: rgba(255, 255, 255, 0.92);
-  --minimap-canvas-bg: rgba(233, 239, 255, 0.85);
-  --modal-backdrop: rgba(40, 55, 100, 0.35);
+  --minimap-bg: rgba(255, 255, 255, 0.95);
+  --minimap-canvas-bg: var(--canvas-bg);
+  --modal-backdrop: rgba(24, 24, 27, 0.35);
   --node-label-fill: #0b1020;
   --node-label-stroke: rgba(255, 255, 255, 0.95);
   --entity-core-stroke: rgba(0, 0, 0, 0.12);
 }
 
 [data-theme='light'] body {
-  background:
-    radial-gradient(1200px 600px at 10% -10%, rgba(91, 140, 255, 0.18), transparent 60%),
-    radial-gradient(1000px 500px at 90% 110%, rgba(124, 196, 255, 0.15), transparent 60%),
-    linear-gradient(180deg, #eef2ff 0%, #f8faff 100%);
+  background: var(--bg);
 }
 
 [data-theme='light'] ::-webkit-scrollbar-thumb {
-  background: #c3cbe4;
+  background: #d4d4d8;
 }
 
 [data-theme='light'] ::-webkit-scrollbar-thumb:hover {
-  background: #a5b0d4;
+  background: #a1a1aa;
 }

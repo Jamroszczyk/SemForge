@@ -15,6 +15,13 @@ export interface OntologyEdge {
   bidirectional?: boolean
   /** 0 = forward directed, 1 = reversed directed, 2 = bidirectional */
   directionPhase?: 0 | 1 | 2
+  lineStyle?: 'solid' | 'dashed'
+}
+
+export type EdgeLineStyle = 'solid' | 'dashed'
+
+export function getEdgeLineStyle(edge: Pick<OntologyEdge, 'lineStyle'>): EdgeLineStyle {
+  return edge.lineStyle ?? 'solid'
 }
 
 /** OWL-style datatype property on a class (range shown as a datatype node on canvas). */
@@ -58,8 +65,6 @@ export function cycleEdgeDirection(edge: OntologyEdge): OntologyEdge {
   }
   return {
     ...edge,
-    sourceId: edge.targetId,
-    targetId: edge.sourceId,
     bidirectional: false,
     directionPhase: 0,
   }
@@ -68,6 +73,65 @@ export function cycleEdgeDirection(edge: OntologyEdge): OntologyEdge {
 export function getEdgeDirectionPhase(edge: OntologyEdge): 0 | 1 | 2 {
   if (edge.bidirectional) return 2
   return edge.directionPhase ?? 0
+}
+
+export function getDraftEdgeArrow(phase: 0 | 1 | 2) {
+  return phase === 2 ? '↔' : phase === 1 ? '←' : '→'
+}
+
+export function cycleDraftEdgePhase(phase: 0 | 1 | 2): 0 | 1 | 2 {
+  return ((phase + 1) % 3) as 0 | 1 | 2
+}
+
+export function getEdgeOtherClassId(edge: OntologyEdge, classId: string) {
+  if (edge.sourceId === classId && edge.targetId === classId) return classId
+  return edge.sourceId === classId ? edge.targetId : edge.sourceId
+}
+
+/** Fixed left node in connection UI (matches object-tab anchor semantics). */
+export function getEdgeAnchorClassId(edge: OntologyEdge) {
+  const phase = getEdgeDirectionPhase(edge)
+  if (phase === 1) return edge.targetId
+  return edge.sourceId
+}
+
+/** Map fixed left=classId, right=otherId UI to stored edge endpoints. */
+export function edgeEndpointsForClassContext(
+  classId: string,
+  otherId: string,
+  phase: 0 | 1 | 2,
+): Pick<OntologyEdge, 'sourceId' | 'targetId' | 'bidirectional' | 'directionPhase'> {
+  if (phase === 1) {
+    return {
+      sourceId: otherId,
+      targetId: classId,
+      bidirectional: false,
+      directionPhase: 1,
+    }
+  }
+  if (phase === 2) {
+    return {
+      sourceId: classId,
+      targetId: otherId,
+      bidirectional: true,
+      directionPhase: 2,
+    }
+  }
+  return {
+    sourceId: classId,
+    targetId: otherId,
+    bidirectional: false,
+    directionPhase: 0,
+  }
+}
+
+export function getEdgeArrowForClassContext(edge: OntologyEdge, classId: string) {
+  const phase = getEdgeDirectionPhase(edge)
+  if (phase === 2) return '↔'
+  const otherId = getEdgeOtherClassId(edge, classId)
+  if (edge.sourceId === classId && edge.targetId === otherId) return '→'
+  if (edge.sourceId === otherId && edge.targetId === classId) return '←'
+  return getDraftEdgeArrow(phase)
 }
 
 /** Stable left/right labels with arrow glyph for sidebar display. */
@@ -133,6 +197,7 @@ export interface SimLink extends SimulationLinkDatum<SimClass> {
   targetId: string
   bidirectional?: boolean
   directionPhase?: 0 | 1 | 2
+  lineStyle?: 'solid' | 'dashed'
   _siblingIndex?: number
   _siblingCount?: number
   _anchorX?: number
