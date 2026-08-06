@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import * as d3 from 'd3'
 import type { ZoomTransform } from 'd3'
-import type { SimClass } from '../types'
-import { CLASS_COLOR, CLASS_RADIUS } from '../types'
+import type { SimClass, SimExpression } from '../types'
+import { CLASS_COLOR, CLASS_EXPIRED_COLOR, CLASS_RADIUS, EXPRESSION_HALF } from '../types'
+import { classColorOrDefault } from '../classColorUtils'
 
 interface MinimapProps {
   wrapRef: React.RefObject<HTMLDivElement | null>
   svgRef: React.RefObject<SVGSVGElement | null>
   nodesRef: React.RefObject<SimClass[]>
+  expressionNodesRef?: React.RefObject<SimExpression[]>
   zoomRef: React.RefObject<d3.ZoomBehavior<SVGSVGElement, unknown> | null>
   transformRef: React.RefObject<ZoomTransform>
   gRootRef: React.RefObject<d3.Selection<SVGGElement, unknown, null, undefined> | null>
@@ -22,6 +24,7 @@ export function Minimap({
   wrapRef,
   svgRef,
   nodesRef,
+  expressionNodesRef,
   zoomRef,
   transformRef,
   gRootRef,
@@ -38,7 +41,8 @@ export function Minimap({
     const gRoot = gRootRef.current
     if (!miniSvg || !mainSvg) return
 
-    const nodes = nodesRef.current ?? []
+    const classNodes = nodesRef.current ?? []
+    const expressionNodes = expressionNodesRef?.current ?? []
     const { width, height } = mainSvg.getBoundingClientRect()
     const t = transformRef.current ?? d3.zoomIdentity
 
@@ -47,12 +51,20 @@ export function Minimap({
     let maxX = 200
     let maxY = 200
 
-    nodes.forEach((n) => {
+    classNodes.forEach((n) => {
       if (n.x == null || n.y == null) return
       minX = Math.min(minX, n.x - CLASS_RADIUS)
       minY = Math.min(minY, n.y - CLASS_RADIUS)
       maxX = Math.max(maxX, n.x + CLASS_RADIUS)
       maxY = Math.max(maxY, n.y + CLASS_RADIUS)
+    })
+
+    expressionNodes.forEach((n) => {
+      if (n.x == null || n.y == null) return
+      minX = Math.min(minX, n.x - EXPRESSION_HALF)
+      minY = Math.min(minY, n.y - EXPRESSION_HALF)
+      maxX = Math.max(maxX, n.x + EXPRESSION_HALF)
+      maxY = Math.max(maxY, n.y + EXPRESSION_HALF)
     })
 
     const bw = Math.max(maxX - minX, 120)
@@ -66,13 +78,26 @@ export function Minimap({
 
     const g = d3.select(miniSvg).select<SVGGElement>('g.content')
     g.selectAll<SVGCircleElement, SimClass>('circle.node-dot')
-      .data(nodes, (d) => d.id)
+      .data(classNodes, (d) => d.id)
       .join('circle')
       .attr('class', 'node-dot')
       .attr('r', 3)
       .attr('cx', (d) => (d.x ?? 0) * scale + ox)
       .attr('cy', (d) => (d.y ?? 0) * scale + oy)
+      .attr('fill', (d) =>
+        d.expired ? CLASS_EXPIRED_COLOR : classColorOrDefault(d.color),
+      )
+      .attr('opacity', (d) => (d.expired ? 0.65 : 1))
+
+    g.selectAll<SVGCircleElement, SimExpression>('circle.expression-dot')
+      .data(expressionNodes, (d) => d.id)
+      .join('circle')
+      .attr('class', 'expression-dot')
+      .attr('r', 2.5)
+      .attr('cx', (d) => (d.x ?? 0) * scale + ox)
+      .attr('cy', (d) => (d.y ?? 0) * scale + oy)
       .attr('fill', CLASS_COLOR)
+      .attr('opacity', 0.85)
 
     const vx0 = -t.x / t.k
     const vy0 = -t.y / t.k
@@ -86,14 +111,14 @@ export function Minimap({
       h: Math.max(8, (vy1 - vy0) * scale),
     })
 
-    if (gRoot && nodes.length > 0) {
+    if (gRoot && (classNodes.length > 0 || expressionNodes.length > 0)) {
       try {
         gRoot.node()?.getBBox()
       } catch {
         /* empty graph */
       }
     }
-  }, [svgRef, nodesRef, transformRef, gRootRef])
+  }, [svgRef, nodesRef, expressionNodesRef, transformRef, gRootRef])
 
   useEffect(() => {
     const wrap = wrapRef.current

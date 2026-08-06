@@ -4,6 +4,7 @@ export type DeleteModalKind =
   | 'class'
   | 'classes'
   | 'edge'
+  | 'expression'
   | 'dataProperty'
   | 'objectProperty'
 
@@ -23,11 +24,12 @@ const COPY: Record<
 > = {
   class: { title: 'Delete class', noun: 'class' },
   edge: { title: 'Delete edge', noun: 'edge' },
+  expression: { title: 'Delete expression', noun: 'expression' },
   dataProperty: { title: 'Delete data property', noun: 'data property' },
   objectProperty: { title: 'Delete connection', noun: 'connection' },
 }
 
-const CLASS_DELETE_DELAY_MS = 2000
+const CLASS_DELETE_DELAY_MS = 1000
 const MAX_LISTED_LABELS = 5
 
 function formatLabelList(labels: string[]) {

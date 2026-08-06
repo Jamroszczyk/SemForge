@@ -1,9 +1,10 @@
 import { useMemo, useState } from 'react'
-import type { OntologyClass } from '../types'
+import type { NamedClassNode } from '../types'
+import { classColorOrDefault } from '../classColorUtils'
 import { filterAndSortClasses } from '../classListUtils'
 
 interface ClassListSidebarProps {
-  classes: OntologyClass[]
+  classes: NamedClassNode[]
   selectedClassIds: ReadonlySet<string>
   hiddenClassIds: ReadonlySet<string>
   collapsed: boolean
@@ -119,7 +120,10 @@ export function ClassListSidebar({
             {displayedClasses.map((c) => {
               const hidden = hiddenClassIds.has(c.id)
               return (
-                <li key={c.id} className={`class-list-entry ${hidden ? 'class-list-entry-hidden' : ''}`}>
+                <li
+                  key={c.id}
+                  className={`class-list-entry ${hidden ? 'class-list-entry-hidden' : ''} ${c.expired ? 'class-list-entry-expired' : ''}`}
+                >
                   <button
                     type="button"
                     className={`class-list-item ${selectedClassIds.has(c.id) ? 'active' : ''}`}
@@ -130,7 +134,18 @@ export function ClassListSidebar({
                       onSelect(c.id, e.shiftKey || e.ctrlKey || e.metaKey)
                     }
                   >
-                    <span className="class-dot" aria-hidden="true" />
+                    <span
+                      className="class-dot"
+                      style={
+                        c.expired
+                          ? undefined
+                          : {
+                              background: classColorOrDefault(c.color),
+                              boxShadow: `0 0 8px ${classColorOrDefault(c.color)}66`,
+                            }
+                      }
+                      aria-hidden="true"
+                    />
                     <span className="class-list-label">{c.label}</span>
                   </button>
                   <button

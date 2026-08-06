@@ -1,14 +1,16 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import * as d3 from 'd3'
 import type { ZoomTransform } from 'd3'
 import type {
   DataPropertyField,
   EditingDataProperty,
-  OntologyClass,
+  ExpressionNode,
+  NamedClassNode,
   OntologyDataProperty,
   OntologyEdge,
   Selection,
   SimClass,
+  SimExpression,
   SimDataProperty,
   SimDataPropertyLink,
   SimLabelAnchor,
@@ -19,42 +21,71 @@ import type {
   SimNode,
 } from '../types'
 import {
+  CHARGE_CLASS,
+  CHARGE_DATA_PROPERTY,
+  CHARGE_EXPRESSION,
+  CHARGE_LABEL_ANCHOR,
+  CHARGE_LOOP_ANCHOR,
   CLASS_COLOR,
   CLASS_RADIUS,
+  COLLIDE_STRENGTH,
   DATA_PROPERTY_AVOID_RANGE,
   DATA_PROPERTY_AVOID_STRENGTH,
-  DATA_PROPERTY_DISTANCE,
   DATA_PROPERTY_HEIGHT,
   DATA_PROPERTY_LINK_STRENGTH,
   DATA_PROPERTY_MIN_WIDTH,
-  getEdgeDirectionPhase,
-  getEdgeLineStyle,
+  EXPRESSION_COLLIDE_PADDING,
+  EXPRESSION_CORNER_RADIUS,
+  EXPRESSION_HALF,
+  DRAG_SETTLE_ALPHA,
+  DRAG_SETTLE_ALPHA_TARGET,
+  DRAG_SETTLE_MS,
+  DRAG_SETTLE_UNPIN_ALPHA,
+  UNCLUMP_HUB_HOLD_ALPHA_TARGET,
+  UNCLUMP_HUB_HOLD_TICKS,
+  UNCLUMP_RESOLVE_PASSES,
+  UNCLUMP_SETTLE_MS,
+  UNCLUMP_SIM_TICKS_PER_PASS,
+  isSimExpression,
   LABEL_ANCHOR_LINK_STRENGTH,
   LABEL_ANCHOR_RESTORE_STRENGTH,
-  LINK_DISTANCE,
-  LOOP_ANCHOR_DISTANCE,
+  LABEL_COLLIDE_RADIUS,
+  LINK_STRENGTH,
+  LOOP_COLLIDE_RADIUS,
   LOOP_EDGE_AVOID_RANGE,
   LOOP_EDGE_AVOID_STRENGTH,
   LOOP_LINK_STRENGTH,
+  NODE_COLLIDE_PADDING,
   isDataPropertyNode,
   isLabelAnchor,
   isLoopAnchor,
 } from '../types'
 import {
+  applyUnclumpPass,
+  computeGraphUnclumpPlan,
   assignParallelOffsets,
   bindAnchorsToLinks,
   computeDynamicSiblingRanks,
-  flipLoopAnchorThroughParent,
+  dataPropertyLinkDistance,
+  chargeStrengthForSimNode,
+  forceHubSpokeSpread,
+  forceIsolatedNodePark,
   forceLoopEdgeAvoidance,
+  forceNetworkStretch,
+  gravityStrengthForSimNode,
   isDraggableEdgeLabel,
   isMultiEdge,
   isSelfLink,
   linkLabelPos,
   linkPath,
+  loopAnchorLinkDistance,
   placeLoopAnchor,
+  statementLinkDistance,
   syncLabelAnchors,
   syncLoopAnchors,
   targetLinkControlPos,
+  computeGraphLayoutBounds,
+  graphLayoutBoundsSize,
 } from '../graphGeometry'
 import {
   dataPropertyEdgeLabelLayout,
@@ -64,19 +95,36 @@ import {
   forceDataPropertyAvoidance,
   syncDataPropertyNodes,
 } from '../dataPropertyGeometry'
+import { getExpressionKindLabel } from '../expressionUtils'
+import {
+  getStatementCanvasLabel,
+  getStatementKind,
+  getStatementRenderSpec,
+  markerUrl,
+  shouldShowStatementCanvasLabel,
+} from '../statementUtils'
 import { Minimap } from './Minimap'
 import { ClassDragTool } from './ClassDragTool'
+import { classColorOrDefault, classColorWithAlpha } from '../classColorUtils'
 
 interface OntologyCanvasProps {
-  classes: OntologyClass[]
+  classes: NamedClassNode[]
+  expressions: ExpressionNode[]
   edges: OntologyEdge[]
   dataProperties: OntologyDataProperty[]
+  showEdgeLabels: boolean
+  showDataProperties: boolean
+  graphLoadGeneration: number
+  unclumpGeneration: number
+  onUnclumpActiveChange?: (active: boolean) => void
   selection: Selection | null
   selectedClassIds: ReadonlySet<string>
   editingLabel: Selection | null
   editingDataProperty: EditingDataProperty | null
-  onCreateAt: (x: number, y: number) => void
+  onCreateClassAt: (x: number, y: number) => void
+  onCreateExpressionAt: (x: number, y: number) => void
   onSelectClass: (id: string, additive: boolean) => void
+  onSelectExpression: (id: string) => void
   onSelectClassDataTab: (id: string) => void
   onSelectAndEditClass: (id: string) => void
   onSelectEdge: (id: string) => void
@@ -88,8 +136,10 @@ interface OntologyCanvasProps {
 
 type CanvasCallbacks = Pick<
   OntologyCanvasProps,
-  | 'onCreateAt'
+  | 'onCreateClassAt'
+  | 'onCreateExpressionAt'
   | 'onSelectClass'
+  | 'onSelectExpression'
   | 'onSelectClassDataTab'
   | 'onSelectAndEditClass'
   | 'onSelectEdge'
@@ -99,24 +149,53 @@ type CanvasCallbacks = Pick<
   | 'onDeselect'
 >
 
-const HANDLE_OFFSET = CLASS_RADIUS + 10
-const HANDLE_HIT_R = 7
-const HANDLE_ZONE_R = 20
+const EXPRESSION_HANDLE_OFFSET = EXPRESSION_HALF + 14
+
+type StatementEndpoint = SimClass | SimExpression
+const HANDLE_OFFSET = CLASS_RADIUS + 14
+/** Outward-pointing arrowhead (tip along +x, away from node center). */
+const HANDLE_TRI_LEN = 19
+const HANDLE_TRI_HALF = 11
+const HANDLE_ZONE_R = 28
+
+function linkHandlePoints(offset: number) {
+  const tipX = offset + HANDLE_TRI_LEN * 0.55
+  const baseX = offset - HANDLE_TRI_LEN * 0.45
+  return `${tipX},0 ${baseX},${HANDLE_TRI_HALF} ${baseX},${-HANDLE_TRI_HALF}`
+}
+
 const LABEL_PAD_X = 12
 const LABEL_PAD_Y = 7
 const LABEL_MIN_W = 58
 const LABEL_TEXT_H = 15
 
+const EXPRESSION_CORE_HALF = EXPRESSION_HALF
+const EXPRESSION_RING_HALF = EXPRESSION_HALF + 4
+const EXPRESSION_HALO_HALF = EXPRESSION_HALF + 14
+
+const GRAPH_LOAD_REVEAL_ALPHA = 0.052
+const GRAPH_LOAD_MAX_WAIT_MS = 8000
+const GRAPH_LOAD_FIT_PADDING = 56
+const GRAPH_LOAD_FIT_DURATION_MS = 900
+
 export function OntologyCanvas({
   classes,
+  expressions,
   edges,
   dataProperties,
+  showEdgeLabels,
+  showDataProperties,
+  graphLoadGeneration,
+  unclumpGeneration,
+  onUnclumpActiveChange,
   selection,
   selectedClassIds,
   editingLabel,
   editingDataProperty,
-  onCreateAt,
+  onCreateClassAt,
+  onCreateExpressionAt,
   onSelectClass,
+  onSelectExpression,
   onSelectClassDataTab,
   onSelectAndEditClass,
   onSelectEdge,
@@ -127,8 +206,11 @@ export function OntologyCanvas({
 }: OntologyCanvasProps) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const svgRef = useRef<SVGSVGElement>(null)
+  const [isGraphLoadSettling, setIsGraphLoadSettling] = useState(false)
+  const [hintExpanded, setHintExpanded] = useState(false)
   const simRef = useRef<d3.Simulation<SimNode, undefined> | null>(null)
   const nodesRef = useRef<SimClass[]>([])
+  const expressionNodesRef = useRef<SimExpression[]>([])
   const anchorsRef = useRef<SimLoopAnchor[]>([])
   const labelAnchorsRef = useRef<SimLabelAnchor[]>([])
   const loopLinksRef = useRef<SimLoopLink[]>([])
@@ -138,8 +220,10 @@ export function OntologyCanvas({
   const transformRef = useRef<ZoomTransform>(d3.zoomIdentity)
   const gRootRef = useRef<d3.Selection<SVGGElement, unknown, null, undefined> | null>(null)
   const linkLayerRef = useRef<d3.Selection<SVGGElement, unknown, null, undefined> | null>(null)
+  const linkHitLayerRef = useRef<d3.Selection<SVGGElement, unknown, null, undefined> | null>(null)
   const dragLineLayerRef = useRef<d3.Selection<SVGGElement, unknown, null, undefined> | null>(null)
   const nodeLayerRef = useRef<d3.Selection<SVGGElement, unknown, null, undefined> | null>(null)
+  const expressionLayerRef = useRef<d3.Selection<SVGGElement, unknown, null, undefined> | null>(null)
   const edgeLabelLayerRef = useRef<d3.Selection<SVGGElement, unknown, null, undefined> | null>(null)
   const dataPropLinkLayerRef = useRef<d3.Selection<SVGGElement, unknown, null, undefined> | null>(
     null,
@@ -155,17 +239,38 @@ export function OntologyCanvas({
   const dataPropLinksRef = useRef<SimDataPropertyLink[]>([])
   const pinnedRef = useRef<Set<string>>(new Set())
   const dragRef = useRef<d3.DragBehavior<SVGGElement, SimClass, SimClass | d3.SubjectPosition> | null>(null)
+  const expressionDragRef = useRef<
+    d3.DragBehavior<SVGGElement, SimExpression, SimExpression | d3.SubjectPosition> | null
+  >(null)
   const dataPropDragRef = useRef<
     d3.DragBehavior<SVGGElement, SimDataProperty, SimDataProperty | d3.SubjectPosition> | null
   >(null)
   const labelDragRef = useRef<d3.DragBehavior<SVGGElement, SimLink, SimLink | d3.SubjectPosition> | null>(null)
   const warmedRef = useRef(false)
-  const linkingRef = useRef<{ source: SimClass; pointerId: number } | null>(null)
+  const graphLoadSettleTimerRef = useRef<number | null>(null)
+  const graphLoadPollRef = useRef<number | null>(null)
+  const graphLoadRevealPendingRef = useRef(false)
+  const unclumpAnimFrameRef = useRef<number | null>(null)
+  const suppressSimRenderRef = useRef(false)
+  const renderSimFrameRef = useRef<(() => void) | null>(null)
+  const onUnclumpActiveChangeRef = useRef(onUnclumpActiveChange)
+  onUnclumpActiveChangeRef.current = onUnclumpActiveChange
+  const lastGraphLoadGenerationRef = useRef(graphLoadGeneration)
+  if (graphLoadGeneration !== lastGraphLoadGenerationRef.current) {
+    lastGraphLoadGenerationRef.current = graphLoadGeneration
+    if (graphLoadGeneration > 0) {
+      warmedRef.current = true
+      pinnedRef.current.clear()
+    }
+  }
+  const linkingRef = useRef<{ source: StatementEndpoint; pointerId: number } | null>(null)
   const pendingLoopSpawnRef = useRef<{ edgeId: string; x: number; y: number } | null>(null)
-  const startLinkingRef = useRef<(source: SimClass, ev: PointerEvent) => void>(() => {})
+  const startLinkingRef = useRef<(source: StatementEndpoint, ev: PointerEvent) => void>(() => {})
   const callbacksRef = useRef<CanvasCallbacks>({
-    onCreateAt,
+    onCreateClassAt,
+    onCreateExpressionAt,
     onSelectClass,
+    onSelectExpression,
     onSelectClassDataTab,
     onSelectAndEditClass,
     onSelectEdge,
@@ -176,8 +281,10 @@ export function OntologyCanvas({
   })
 
   callbacksRef.current = {
-    onCreateAt,
+    onCreateClassAt,
+    onCreateExpressionAt,
     onSelectClass,
+    onSelectExpression,
     onSelectClassDataTab,
     onSelectAndEditClass,
     onSelectEdge,
@@ -185,6 +292,153 @@ export function OntologyCanvas({
     onEditDataProperty,
     onCreateEdge,
     onDeselect,
+  }
+
+  const selectedClassIdsRef = useRef(selectedClassIds)
+  selectedClassIdsRef.current = selectedClassIds
+  const editingLabelRef = useRef(editingLabel)
+  editingLabelRef.current = editingLabel
+  const showEdgeLabelsRef = useRef(showEdgeLabels)
+  showEdgeLabelsRef.current = showEdgeLabels
+  const showDataPropertiesRef = useRef(showDataProperties)
+  showDataPropertiesRef.current = showDataProperties
+  const visibilityLayoutPrimedRef = useRef(false)
+
+  const applySimulationLayoutVisibility = (sim: d3.Simulation<SimNode, undefined>) => {
+    const labelAnchors = showEdgeLabelsRef.current ? labelAnchorsRef.current : []
+    const dataProps = showDataPropertiesRef.current ? dataPropsRef.current : []
+
+    syncSimulationNodes(
+      sim,
+      nodesRef.current,
+      expressionNodesRef.current,
+      anchorsRef.current,
+      labelAnchors,
+      dataProps,
+    )
+
+    ;(sim.force('labelAnchor') as d3.ForceLink<SimNode, SimLabelAnchorLink>).links(
+      showEdgeLabelsRef.current ? labelAnchorLinksRef.current : [],
+    )
+    ;(sim.force('dataPropLink') as d3.ForceLink<SimNode, SimDataPropertyLink>).links(
+      showDataPropertiesRef.current ? dataPropLinksRef.current : [],
+    )
+  }
+
+  const startGraphLoadSettling = (sim: d3.Simulation<SimNode, undefined>) => {
+    if (graphLoadSettleTimerRef.current !== null) {
+      window.clearTimeout(graphLoadSettleTimerRef.current)
+      graphLoadSettleTimerRef.current = null
+    }
+    if (graphLoadPollRef.current !== null) {
+      window.cancelAnimationFrame(graphLoadPollRef.current)
+      graphLoadPollRef.current = null
+    }
+
+    const nodeCount =
+      nodesRef.current.length +
+      expressionNodesRef.current.length +
+      dataPropsRef.current.length
+
+    if (nodeCount === 0) {
+      graphLoadRevealPendingRef.current = false
+      setIsGraphLoadSettling(false)
+      return
+    }
+
+    graphLoadRevealPendingRef.current = true
+    setIsGraphLoadSettling(true)
+
+    warmLayout(sim, Math.min(2400, 600 + nodeCount * 16))
+
+    const loadUnclumpInput = {
+      classes: nodesRef.current,
+      expressions: expressionNodesRef.current,
+      links: linksRef.current,
+      dataProperties: showDataPropertiesRef.current ? dataPropsRef.current : [],
+      loopAnchors: anchorsRef.current,
+      labelAnchors: showEdgeLabelsRef.current ? labelAnchorsRef.current : [],
+    }
+    // Hub-hold settle already ran inside hidden unclump. Cool quickly and reveal —
+    // do not keep alphaTarget warm or alpha never drops below the reveal threshold.
+    runHiddenUnclumpResolve(sim, loadUnclumpInput, suppressSimRenderRef)
+    sim.alphaTarget(0).alpha(0.35).restart()
+
+    const startedAt = performance.now()
+
+    const finishGraphLoadReveal = () => {
+      if (!graphLoadRevealPendingRef.current) return
+      graphLoadRevealPendingRef.current = false
+
+      if (graphLoadSettleTimerRef.current !== null) {
+        window.clearTimeout(graphLoadSettleTimerRef.current)
+        graphLoadSettleTimerRef.current = null
+      }
+      if (graphLoadPollRef.current !== null) {
+        window.cancelAnimationFrame(graphLoadPollRef.current)
+        graphLoadPollRef.current = null
+      }
+
+      sim.alphaTarget(0).alpha(0)
+      setIsGraphLoadSettling(false)
+      fitGraphToView(true)
+    }
+
+    const poll = () => {
+      if (!graphLoadRevealPendingRef.current) return
+
+      const elapsed = performance.now() - startedAt
+      if (sim.alpha() < GRAPH_LOAD_REVEAL_ALPHA || elapsed >= GRAPH_LOAD_MAX_WAIT_MS) {
+        finishGraphLoadReveal()
+        return
+      }
+
+      graphLoadPollRef.current = window.requestAnimationFrame(poll)
+    }
+
+    graphLoadPollRef.current = window.requestAnimationFrame(poll)
+    graphLoadSettleTimerRef.current = window.setTimeout(finishGraphLoadReveal, GRAPH_LOAD_MAX_WAIT_MS)
+  }
+
+  const fitGraphToView = (animated: boolean) => {
+    const svg = svgRef.current
+    const zoom = zoomRef.current
+    if (!svg || !zoom) return
+
+    const bounds = computeGraphLayoutBounds({
+      classes: nodesRef.current,
+      expressions: expressionNodesRef.current,
+      dataProperties: showDataPropertiesRef.current ? dataPropsRef.current : [],
+      labelAnchors: showEdgeLabelsRef.current ? labelAnchorsRef.current : [],
+      loopAnchors: anchorsRef.current,
+    })
+    if (!bounds) return
+
+    const { width, height } = svg.getBoundingClientRect()
+    if (width <= 0 || height <= 0) return
+
+    const layout = graphLayoutBoundsSize(bounds)
+    const scale = Math.min(
+      (width - GRAPH_LOAD_FIT_PADDING * 2) / layout.width,
+      (height - GRAPH_LOAD_FIT_PADDING * 2) / layout.height,
+      4,
+    )
+    const clampedScale = Math.max(0.1, scale)
+    const transform = d3.zoomIdentity
+      .translate(width / 2, height / 2)
+      .scale(clampedScale)
+      .translate(-layout.centerX, -layout.centerY)
+
+    const svgSelection = d3.select(svg)
+    if (animated) {
+      svgSelection
+        .transition()
+        .duration(GRAPH_LOAD_FIT_DURATION_MS)
+        .ease(d3.easeCubicOut)
+        .call(zoom.transform, transform)
+    } else {
+      svgSelection.call(zoom.transform, transform)
+    }
   }
 
   useEffect(() => {
@@ -216,10 +470,38 @@ export function OntologyCanvas({
       .attr('class', 'arrow-path')
       .attr('d', 'M0,-5L10,0L0,5')
 
+    defs
+      .append('marker')
+      .attr('id', 'marker-bar')
+      .attr('viewBox', '0 -6 10 12')
+      .attr('refX', 10)
+      .attr('refY', 0)
+      .attr('markerWidth', 8)
+      .attr('markerHeight', 8)
+      .attr('orient', 'auto')
+      .append('path')
+      .attr('class', 'bar-path')
+      .attr('d', 'M10,-6L10,6')
+
+    defs
+      .append('marker')
+      .attr('id', 'marker-diamond')
+      .attr('viewBox', '-5 -5 10 10')
+      .attr('refX', 6)
+      .attr('refY', 0)
+      .attr('markerWidth', 8)
+      .attr('markerHeight', 8)
+      .attr('orient', 'auto')
+      .append('path')
+      .attr('class', 'diamond-path')
+      .attr('d', 'M0,-4L4,0L0,4L-4,0Z')
+
     const gRoot = svg.append('g').attr('class', 'root')
     const linkLayer = gRoot.append('g').attr('class', 'links')
     const dataPropLinkLayer = gRoot.append('g').attr('class', 'data-prop-links')
     const nodeLayer = gRoot.append('g').attr('class', 'nodes')
+    const expressionLayer = gRoot.append('g').attr('class', 'expressions')
+    const linkHitLayer = gRoot.append('g').attr('class', 'link-hits')
     const dataPropNodeLayer = gRoot.append('g').attr('class', 'data-prop-nodes')
     const dataPropLabelLayer = gRoot.append('g').attr('class', 'data-prop-edge-labels')
     const edgeLabelLayer = gRoot.append('g').attr('class', 'edge-labels')
@@ -232,9 +514,11 @@ export function OntologyCanvas({
 
     gRootRef.current = gRoot
     linkLayerRef.current = linkLayer
+    linkHitLayerRef.current = linkHitLayer
     dataPropLinkLayerRef.current = dataPropLinkLayer
     dragLineLayerRef.current = dragLineLayer
     nodeLayerRef.current = nodeLayer
+    expressionLayerRef.current = expressionLayer
     dataPropNodeLayerRef.current = dataPropNodeLayer
     edgeLabelLayerRef.current = edgeLabelLayer
     dataPropLabelLayerRef.current = dataPropLabelLayer
@@ -257,6 +541,9 @@ export function OntologyCanvas({
       linkingRef.current = null
       dragLine.style('display', 'none')
       nodeLayer.selectAll<SVGGElement, SimClass>('g.node').classed('linking-source link-target', false)
+      expressionLayer
+        .selectAll<SVGGElement, SimExpression>('g.expression-node')
+        .classed('linking-source link-target', false)
       window.removeEventListener('pointermove', onLinkMove)
       window.removeEventListener('pointerup', onLinkUp)
       window.removeEventListener('pointercancel', onLinkUp)
@@ -270,7 +557,10 @@ export function OntologyCanvas({
       const target = findNodeAt(x, y)
       nodeLayer
         .selectAll<SVGGElement, SimClass>('g.node')
-        .classed('link-target', (n) => (target ? n.id === target.id : false))
+        .classed('link-target', (n) => (target?.kind === 'namedClass' ? n.id === target.id : false))
+      expressionLayer
+        .selectAll<SVGGElement, SimExpression>('g.expression-node')
+        .classed('link-target', (n) => (target?.kind === 'expression' ? n.id === target.id : false))
     }
 
     const onLinkUp = (e: PointerEvent) => {
@@ -290,7 +580,7 @@ export function OntologyCanvas({
       clearLinking()
     }
 
-    const startLinking = (source: SimClass, ev: PointerEvent) => {
+    const startLinking = (source: StatementEndpoint, ev: PointerEvent) => {
       if (ev.button !== 0) return
       ev.stopPropagation()
       ev.preventDefault()
@@ -298,7 +588,10 @@ export function OntologyCanvas({
       linkingRef.current = { source, pointerId: ev.pointerId }
       nodeLayer
         .selectAll<SVGGElement, SimClass>('g.node')
-        .classed('linking-source', (n) => n.id === source.id)
+        .classed('linking-source', (n) => n.kind === 'namedClass' && n.id === source.id)
+      expressionLayer
+        .selectAll<SVGGElement, SimExpression>('g.expression-node')
+        .classed('linking-source', (n) => n.kind === 'expression' && n.id === source.id)
 
       const start = handleWorldPos(source)
       dragLine
@@ -313,16 +606,20 @@ export function OntologyCanvas({
       window.addEventListener('pointercancel', onLinkUp)
     }
 
-    const handleWorldPos = (node: SimClass) => ({
-      x: (node.x ?? 0) + HANDLE_OFFSET,
-      y: node.y ?? 0,
-    })
+    const handleWorldPos = (node: StatementEndpoint) => {
+      const offset = node.kind === 'expression' ? EXPRESSION_HANDLE_OFFSET : HANDLE_OFFSET
+      return {
+        x: (node.x ?? 0) + offset,
+        y: node.y ?? 0,
+      }
+    }
 
-    const findNodeAt = (x: number, y: number) => {
-      const hitR = CLASS_RADIUS + 6
-      let best: SimClass | null = null
+    const findNodeAt = (x: number, y: number): StatementEndpoint | null => {
+      let best: StatementEndpoint | null = null
       let bestDist = Infinity
+
       for (const n of nodesRef.current) {
+        const hitR = CLASS_RADIUS + 6
         const dx = (n.x ?? 0) - x
         const dy = (n.y ?? 0) - y
         const dist = Math.sqrt(dx * dx + dy * dy)
@@ -331,6 +628,18 @@ export function OntologyCanvas({
           bestDist = dist
         }
       }
+
+      for (const n of expressionNodesRef.current) {
+        const hitR = EXPRESSION_HALF + 6
+        const dx = (n.x ?? 0) - x
+        const dy = (n.y ?? 0) - y
+        const dist = Math.sqrt(dx * dx + dy * dy)
+        if (dist <= hitR && dist < bestDist) {
+          best = n
+          bestDist = dist
+        }
+      }
+
       return best
     }
 
@@ -338,8 +647,9 @@ export function OntologyCanvas({
 
     svg.on('pointerdown', (ev) => {
       const target = ev.target as Element
-      if (target.closest('.node, .edge-label, .link-handle, .data-prop-node, .data-prop-edge-label')) return
+      if (target.closest('.node, .expression-node, .edge-label, .link-hit, .link-handle, .data-prop-node, .data-prop-edge-label')) return
       nodeLayer.selectAll<SVGGElement, SimClass>('g.node').classed('selected', false)
+      expressionLayer.selectAll<SVGGElement, SimExpression>('g.expression-node').classed('selected', false)
       edgeLabelLayer.selectAll<SVGGElement, SimLink>('g.edge-label').classed('selected', false)
       callbacksRef.current.onDeselect()
     })
@@ -347,10 +657,10 @@ export function OntologyCanvas({
     svg.on('dblclick.zoom', null)
     svg.on('dblclick', (ev) => {
       const target = ev.target as Element
-      if (target.closest('.node, .edge-label, .link-handle, .data-prop-node, .data-prop-edge-label')) return
+      if (target.closest('.node, .expression-node, .edge-label, .link-handle, .data-prop-node, .data-prop-edge-label')) return
       ev.preventDefault()
       const [x, y] = d3.pointer(ev, gRoot.node())
-      callbacksRef.current.onCreateAt(x, y)
+      callbacksRef.current.onCreateClassAt(x, y)
     })
 
     const drag = d3
@@ -374,6 +684,41 @@ export function OntologyCanvas({
         if (!ev.active) simRef.current?.alphaTarget(0)
         d.fx = null
         d.fy = null
+        if (simRef.current) {
+          resumeLayoutAfterDrag(
+            simRef.current,
+            findMaxGravityHub(nodesRef.current, expressionNodesRef.current, linksRef.current),
+          )
+        }
+      })
+
+    const expressionDrag = d3
+      .drag<SVGGElement, SimExpression>()
+      .filter((ev) => {
+        const t = ev.target as Element
+        return !t.classList.contains('link-handle') && !t.classList.contains('link-handle-zone')
+      })
+      .on('start', (ev, d) => {
+        if (!ev.active) simRef.current?.alphaTarget(0.3).restart()
+        d.vx = 0
+        d.vy = 0
+        d.fx = d.x
+        d.fy = d.y
+      })
+      .on('drag', (ev, d) => {
+        d.fx = ev.x
+        d.fy = ev.y
+      })
+      .on('end', (ev, d) => {
+        if (!ev.active) simRef.current?.alphaTarget(0)
+        d.fx = null
+        d.fy = null
+        if (simRef.current) {
+          resumeLayoutAfterDrag(
+            simRef.current,
+            findMaxGravityHub(nodesRef.current, expressionNodesRef.current, linksRef.current),
+          )
+        }
       })
 
     const dataPropDrag = d3
@@ -393,7 +738,10 @@ export function OntologyCanvas({
         if (!ev.active) sim.alphaTarget(0)
         d.fx = null
         d.fy = null
-        sim.alpha(0.15).restart()
+        resumeLayoutAfterDrag(
+          sim,
+          findMaxGravityHub(nodesRef.current, expressionNodesRef.current, linksRef.current),
+        )
       })
 
     const labelDrag = d3
@@ -424,19 +772,22 @@ export function OntologyCanvas({
         if (!ev.active) sim.alphaTarget(0)
         anchor.fx = null
         anchor.fy = null
-        sim.alpha(0.18).restart()
+        resumeLayoutAfterDrag(
+          sim,
+          findMaxGravityHub(nodesRef.current, expressionNodesRef.current, linksRef.current),
+        )
       })
 
     const linkForce = d3
-      .forceLink<SimClass, SimLink>([])
+      .forceLink<StatementEndpoint, SimLink>([])
       .id((d) => d.id)
-      .distance((d) => (isSelfLink(d) ? 0 : LINK_DISTANCE))
-      .strength((d) => (isSelfLink(d) ? 0 : 0.32))
+      .distance((d) => statementLinkDistance(d))
+      .strength((d) => (isSelfLink(d) ? 0 : LINK_STRENGTH))
 
     const loopLinkForce = d3
       .forceLink<SimNode, SimLoopLink>([])
       .id((d) => d.id)
-      .distance(LOOP_ANCHOR_DISTANCE)
+      .distance((d) => loopAnchorLinkDistance(d))
       .strength(LOOP_LINK_STRENGTH)
 
     const labelAnchorLinkForce = d3
@@ -455,15 +806,12 @@ export function OntologyCanvas({
     const dataPropLinkForce = d3
       .forceLink<SimNode, SimDataPropertyLink>([])
       .id((d) => d.id)
-      .distance((link) => {
-        const target = link.target as SimDataProperty
-        return DATA_PROPERTY_DISTANCE + (target._outwardPush ?? 0)
-      })
+      .distance((link) => dataPropertyLinkDistance(link))
       .strength(DATA_PROPERTY_LINK_STRENGTH)
 
     const labelRestoreForce = forceLabelRestore(
       () => linksRef.current,
-      () => labelAnchorsRef.current,
+      () => (showEdgeLabelsRef.current ? labelAnchorsRef.current : []),
       LABEL_ANCHOR_RESTORE_STRENGTH,
     )
 
@@ -471,29 +819,48 @@ export function OntologyCanvas({
       () => linksRef.current,
       () => anchorsRef.current,
       () => nodesRef.current,
-      () => labelAnchorsRef.current,
+      () => (showEdgeLabelsRef.current ? labelAnchorsRef.current : []),
       LOOP_EDGE_AVOID_STRENGTH,
       LOOP_EDGE_AVOID_RANGE,
     )
 
     const dataPropAvoidForce = forceDataPropertyAvoidance(
-      () => dataPropsRef.current,
+      () => (showDataPropertiesRef.current ? dataPropsRef.current : []),
       () => nodesRef.current,
       () => linksRef.current,
       () => anchorsRef.current,
-      () => labelAnchorsRef.current,
+      () => (showEdgeLabelsRef.current ? labelAnchorsRef.current : []),
       DATA_PROPERTY_AVOID_STRENGTH,
       DATA_PROPERTY_AVOID_RANGE,
     )
 
+    const networkStretchForce = forceNetworkStretch(() => linksRef.current)
+    const hubSpokeSpreadForce = forceHubSpokeSpread(() => linksRef.current)
+    const isolatedParkForce = forceIsolatedNodePark(
+      () => [...nodesRef.current, ...expressionNodesRef.current],
+      () => linksRef.current,
+    )
+
+    const gravityStrength = (d: d3.SimulationNodeDatum) =>
+      gravityStrengthForSimNode(d as SimNode, linksRef.current)
+
     const sim = d3
       .forceSimulation<SimNode>([])
-      .force('charge', d3.forceManyBody<SimNode>().strength((d) => {
-        if (isLoopAnchor(d)) return -160
-        if (isLabelAnchor(d)) return -120
-        if (isDataPropertyNode(d)) return -135
-        return -780
-      }))
+      .force(
+        'charge',
+        d3
+          .forceManyBody<SimNode>()
+          .strength((d) => {
+            if (isLoopAnchor(d)) return CHARGE_LOOP_ANCHOR
+            if (isLabelAnchor(d)) return CHARGE_LABEL_ANCHOR
+            if (isDataPropertyNode(d)) return CHARGE_DATA_PROPERTY
+            const scaled = chargeStrengthForSimNode(d, linksRef.current)
+            if (scaled != null) return scaled
+            if (isSimExpression(d)) return CHARGE_EXPRESSION
+            return CHARGE_CLASS
+          })
+          .distanceMin(1),
+      )
       .force('link', linkForce)
       .force('loop', loopLinkForce)
       .force('labelAnchor', labelAnchorLinkForce)
@@ -501,30 +868,42 @@ export function OntologyCanvas({
       .force('labelRestore', labelRestoreForce)
       .force('loopEdgeAvoid', loopEdgeAvoidForce)
       .force('dataPropAvoid', dataPropAvoidForce)
+      .force('networkStretch', networkStretchForce)
+      .force('hubSpokeSpread', hubSpokeSpreadForce)
+      .force('isolatedPark', isolatedParkForce)
       .force(
         'collide',
         d3
           .forceCollide<SimNode>()
           .radius((d) => {
-            if (isLoopAnchor(d)) return 24
-            if (isLabelAnchor(d)) return 22
+            if (isLoopAnchor(d)) return LOOP_COLLIDE_RADIUS
+            if (isLabelAnchor(d)) return LABEL_COLLIDE_RADIUS
             if (isDataPropertyNode(d)) {
               const hw = (d._boxWidth ?? DATA_PROPERTY_MIN_WIDTH) / 2
-              return Math.max(hw, DATA_PROPERTY_HEIGHT / 2) + 14
+              return Math.max(hw, DATA_PROPERTY_HEIGHT / 2) + Math.round(14 * 1.3)
             }
-            return CLASS_RADIUS + 22
+            if (isSimExpression(d)) return EXPRESSION_HALO_HALF + EXPRESSION_COLLIDE_PADDING
+            return CLASS_RADIUS + NODE_COLLIDE_PADDING
           })
-          .strength(0.92),
+          .strength(COLLIDE_STRENGTH),
       )
-      .force('x', d3.forceX(0).strength(0.022))
-      .force('y', d3.forceY(0).strength(0.022))
+      .force('x', d3.forceX(0).strength(gravityStrength))
+      .force('y', d3.forceY(0).strength(gravityStrength))
       .alphaTarget(0)
 
-    sim.on('tick', () => {
-      bindAnchorsToLinks(linksRef.current, anchorsRef.current, labelAnchorsRef.current)
+    const renderSimFrame = () => {
+      bindAnchorsToLinks(
+        linksRef.current,
+        anchorsRef.current,
+        showEdgeLabelsRef.current ? labelAnchorsRef.current : [],
+      )
 
       linkLayer
-        .selectAll<SVGPathElement, SimLink>('g.link-g path.link')
+        .selectAll<SVGPathElement, SimLink>('g.link-g path.link:not(.link-hit), g.link-g path.link-underlay')
+        .attr('d', (d) => linkPath(d))
+
+      linkHitLayerRef.current
+        ?.selectAll<SVGPathElement, SimLink>('g.link-hit-g path.link-hit')
         .attr('d', (d) => linkPath(d))
 
       edgeLabelLayer
@@ -536,6 +915,10 @@ export function OntologyCanvas({
 
       nodeLayer
         .selectAll<SVGGElement, SimClass>('g.node')
+        .attr('transform', (d) => `translate(${d.x},${d.y})`)
+
+      expressionLayer
+        .selectAll<SVGGElement, SimExpression>('g.expression-node')
         .attr('transform', (d) => `translate(${d.x},${d.y})`)
 
       dataPropLinkLayer
@@ -564,21 +947,53 @@ export function OntologyCanvas({
       }
 
       for (const id of [...pinnedRef.current]) {
-        const node = nodesRef.current.find((n) => n.id === id)
+        const classNode = nodesRef.current.find((n) => n.id === id)
+        const exprNode = expressionNodesRef.current.find((n) => n.id === id)
+        const node = classNode ?? exprNode
         if (node && sim.alpha() < 0.05) {
           node.fx = null
           node.fy = null
           pinnedRef.current.delete(id)
         }
       }
+    }
+
+    renderSimFrameRef.current = renderSimFrame
+
+    sim.on('tick', () => {
+      if (suppressSimRenderRef.current) return
+      renderSimFrame()
     })
 
     simRef.current = sim
     dragRef.current = drag
+    expressionDragRef.current = expressionDrag
     dataPropDragRef.current = dataPropDrag
     labelDragRef.current = labelDrag
 
     return () => {
+      if (dragSettleTimer !== null) {
+        window.clearTimeout(dragSettleTimer)
+        dragSettleTimer = null
+      }
+      if (dragSettleCoolRaf !== null) {
+        window.cancelAnimationFrame(dragSettleCoolRaf)
+        dragSettleCoolRaf = null
+      }
+      if (unclumpAnimFrameRef.current !== null) {
+        window.cancelAnimationFrame(unclumpAnimFrameRef.current)
+        unclumpAnimFrameRef.current = null
+      }
+      onUnclumpActiveChangeRef.current?.(false)
+      if (graphLoadSettleTimerRef.current !== null) {
+        window.clearTimeout(graphLoadSettleTimerRef.current)
+        graphLoadSettleTimerRef.current = null
+      }
+      if (graphLoadPollRef.current !== null) {
+        window.cancelAnimationFrame(graphLoadPollRef.current)
+        graphLoadPollRef.current = null
+      }
+      graphLoadRevealPendingRef.current = false
       warmedRef.current = false
       clearLinking()
       sim.stop()
@@ -589,8 +1004,10 @@ export function OntologyCanvas({
       svg.selectAll('*').remove()
       gRootRef.current = null
       linkLayerRef.current = null
+      linkHitLayerRef.current = null
       dragLineLayerRef.current = null
       nodeLayerRef.current = null
+      expressionLayerRef.current = null
       edgeLabelLayerRef.current = null
       dataPropLinkLayerRef.current = null
       dataPropNodeLayerRef.current = null
@@ -611,8 +1028,22 @@ export function OntologyCanvas({
 
     let changed = false
 
+    const classById = new Map(classes.map((c) => [c.id, c]))
+
     const kept = prev.filter((n) => nextIds.has(n.id))
     if (kept.length !== prev.length) changed = true
+
+    for (const n of kept) {
+      const c = classById.get(n.id)
+      if (!c) continue
+      n.kind = c.kind
+      n.label = c.label
+      n.tag = c.tag
+      n.iri = c.iri
+      n.comment = c.comment
+      n.expired = c.expired
+      n.color = c.color
+    }
 
     const nodes = [...kept]
     const newNodeIds: string[] = []
@@ -624,9 +1055,9 @@ export function OntologyCanvas({
         const y = c.y ?? 0
         if (pinForWarmLayout) {
           pinnedRef.current.add(c.id)
-          nodes.push({ id: c.id, label: c.label, x, y, fx: x, fy: y, vx: 0, vy: 0 })
+          nodes.push({ ...c, x, y, fx: x, fy: y, vx: 0, vy: 0 })
         } else {
-          nodes.push({ id: c.id, label: c.label, x, y, vx: 0, vy: 0 })
+          nodes.push({ ...c, x, y, vx: 0, vy: 0 })
         }
         newNodeIds.push(c.id)
         changed = true
@@ -636,16 +1067,10 @@ export function OntologyCanvas({
     nodesRef.current = nodes
 
     const svg = svgRef.current
-    if (svg) aimCenterForces(sim, svg)
+    if (svg) aimCenterForces(sim, svg, () => linksRef.current)
 
     if (changed) {
-      syncSimulationNodes(
-        sim,
-        nodes,
-        anchorsRef.current,
-        labelAnchorsRef.current,
-        dataPropsRef.current,
-      )
+      applySimulationLayoutVisibility(sim)
       const newCount = nodes.length - prev.length
       if (!warmedRef.current && nodes.length > 0) {
         warmLayout(sim, Math.min(520, 120 + nodes.length * 12))
@@ -690,6 +1115,7 @@ export function OntologyCanvas({
       nodeEnter.append('circle').attr('class', 'entity-ring')
       nodeEnter.append('circle').attr('class', 'entity-core')
       nodeEnter.append('text').attr('class', 'node-label')
+      nodeEnter.append('text').attr('class', 'node-tag')
       nodeEnter
         .append('circle')
         .attr('class', 'link-handle-zone')
@@ -699,11 +1125,9 @@ export function OntologyCanvas({
         .on('pointerenter', onHandleZoneEnter)
         .on('pointerleave', onHandleZoneLeave)
       nodeEnter
-        .append('circle')
+        .append('polygon')
         .attr('class', 'link-handle')
-        .attr('cx', HANDLE_OFFSET)
-        .attr('cy', 0)
-        .attr('r', HANDLE_HIT_R)
+        .attr('points', linkHandlePoints(HANDLE_OFFSET))
         .on('pointerenter', onHandleZoneEnter)
         .on('pointerleave', onHandleZoneLeave)
         .on('pointerdown', (ev, d) => {
@@ -724,53 +1148,243 @@ export function OntologyCanvas({
             .attr('r', HANDLE_ZONE_R)
             .on('pointerenter', onHandleZoneEnter)
             .on('pointerleave', onHandleZoneLeave)
+        } else {
+          g.select<SVGCircleElement>('circle.link-handle-zone')
+            .attr('cx', HANDLE_OFFSET)
+            .attr('r', HANDLE_ZONE_R)
         }
-        g.select<SVGCircleElement>('circle.link-handle')
+        // Migrate legacy circle handles → outward triangle.
+        g.selectAll('circle.link-handle').remove()
+        let handle = g.select<SVGPolygonElement>('polygon.link-handle')
+        if (handle.empty()) {
+          handle = g
+            .append('polygon')
+            .attr('class', 'link-handle')
+            .on('pointerdown', (ev, d) => {
+              startLinkingRef.current(d as StatementEndpoint, ev)
+            })
+        }
+        handle
+          .attr('points', linkHandlePoints(HANDLE_OFFSET))
           .on('pointerenter', onHandleZoneEnter)
           .on('pointerleave', onHandleZoneLeave)
       })
 
       nodeMerged.select('circle.selection-halo').attr('r', CLASS_RADIUS + 14)
 
-      nodeMerged.select('circle.entity-ring').attr('r', CLASS_RADIUS + 4).attr('stroke', CLASS_COLOR)
+      nodeMerged.select('circle.entity-ring').attr('r', CLASS_RADIUS + 4)
 
-      nodeMerged.select('circle.entity-core').attr('r', CLASS_RADIUS).attr('fill', CLASS_COLOR)
+      nodeMerged.select('circle.entity-core').attr('r', CLASS_RADIUS)
 
-      nodeMerged
-        .select('text.node-label')
-        .attr('dy', 0)
-        .text((d) => truncate(d.label, 34))
+      nodeMerged.each(function (d) {
+        const editingClassId =
+          editingLabelRef.current?.kind === 'class' ? editingLabelRef.current.id : null
+        paintClassNodeAppearance(d3.select(this), d, {
+          selected: selectedClassIdsRef.current.has(d.id),
+          editing: d.id === editingClassId,
+        })
+        paintClassNodeLabels(d3.select(this), d, editingClassId)
+      })
     }
 
-    pinnedRef.current.forEach((id) => {
-      if (!nextIds.has(id)) pinnedRef.current.delete(id)
-    })
+    for (const id of [...pinnedRef.current]) {
+      if (prev.some((p) => p.id === id) && !nextIds.has(id)) pinnedRef.current.delete(id)
+    }
   }, [classes.map((c) => c.id).join('|')])
 
   useEffect(() => {
     const sim = simRef.current
+    const expressionLayer = expressionLayerRef.current
+    const expressionDrag = expressionDragRef.current
+    if (!sim || !expressionLayer || !expressionDrag) return
+
+    const prev = expressionNodesRef.current
+    const prevIds = new Set(prev.map((n) => n.id))
+    const nextIds = new Set(expressions.map((e) => e.id))
+
+    let changed = false
+
+    const exprById = new Map(expressions.map((e) => [e.id, e]))
+
+    const kept = prev.filter((n) => nextIds.has(n.id))
+    if (kept.length !== prev.length) changed = true
+
+    for (const n of kept) {
+      const e = exprById.get(n.id)
+      if (!e) continue
+      n.kind = e.kind
+      n.expressionKind = e.expressionKind
+    }
+
+    const nodes = [...kept]
+    const newNodeIds: string[] = []
+    const pinForWarmLayout = !warmedRef.current
+
+    for (const e of expressions) {
+      if (!prevIds.has(e.id)) {
+        const x = e.x ?? 0
+        const y = e.y ?? 0
+        if (pinForWarmLayout) {
+          pinnedRef.current.add(e.id)
+          nodes.push({ ...e, x, y, fx: x, fy: y, vx: 0, vy: 0 })
+        } else {
+          nodes.push({ ...e, x, y, vx: 0, vy: 0 })
+        }
+        newNodeIds.push(e.id)
+        changed = true
+      }
+    }
+
+    expressionNodesRef.current = nodes
+
+    const svg = svgRef.current
+    if (svg) aimCenterForces(sim, svg, () => linksRef.current)
+
+    if (changed) {
+      applySimulationLayoutVisibility(sim)
+      const newCount = nodes.length - prev.length
+      if (!warmedRef.current && nodes.length > 0 && nodesRef.current.length === 0) {
+        warmLayout(sim, Math.min(520, 120 + nodes.length * 12))
+        warmedRef.current = true
+        releasePinnedExpressionNodes(newNodeIds, nodes, pinnedRef.current)
+        sim.alpha(0.22).restart()
+      } else if (newCount > 0) {
+        sim.alpha(Math.min(0.22, 0.1 + newCount * 0.02)).restart()
+      }
+    }
+
+    const nodeSel = expressionLayer
+      .selectAll<SVGGElement, SimExpression>('g.expression-node')
+      .data(nodes, (d) => d.id)
+
+    nodeSel.exit().remove()
+
+    const nodeEnter = nodeSel
+      .enter()
+      .append('g')
+      .attr('class', 'expression-node')
+      .call(expressionDrag)
+      .on('pointerdown', (ev, d) => {
+        if (ev.button !== 0) return
+        if ((ev.target as Element).closest('.link-handle')) return
+        ev.stopPropagation()
+        edgeLabelLayerRef.current
+          ?.selectAll<SVGGElement, SimLink>('g.edge-label')
+          .classed('selected', false)
+        nodeLayerRef.current
+          ?.selectAll<SVGGElement, SimClass>('g.node')
+          .classed('selected', false)
+        callbacksRef.current.onSelectExpression(d.id)
+      })
+
+    const shapeEnter = nodeEnter.append('g').attr('class', 'expression-shape-group').attr(
+      'transform',
+      'rotate(45)',
+    )
+    shapeEnter.append('rect').attr('class', 'selection-halo expression-halo')
+    shapeEnter
+      .append('rect')
+      .attr('class', 'entity-ring expression-ring')
+      .attr('fill', 'none')
+      .attr('stroke', CLASS_COLOR)
+    shapeEnter
+      .append('rect')
+      .attr('class', 'entity-core expression-core')
+      .attr('fill', CLASS_COLOR)
+      .attr('stroke', 'var(--entity-core-stroke)')
+
+    nodeEnter.append('text').attr('class', 'node-label')
+    nodeEnter
+      .append('circle')
+      .attr('class', 'link-handle-zone')
+      .attr('cx', EXPRESSION_HANDLE_OFFSET)
+      .attr('cy', 0)
+      .attr('r', HANDLE_ZONE_R)
+      .on('pointerenter', onHandleZoneEnter)
+      .on('pointerleave', onHandleZoneLeave)
+    nodeEnter
+      .append('polygon')
+      .attr('class', 'link-handle')
+      .attr('points', linkHandlePoints(EXPRESSION_HANDLE_OFFSET))
+      .on('pointerenter', onHandleZoneEnter)
+      .on('pointerleave', onHandleZoneLeave)
+      .on('pointerdown', (ev, d) => {
+        startLinkingRef.current(d, ev)
+      })
+
+    const nodeMerged = nodeEnter.merge(nodeSel)
+    nodeMerged.on('pointerleave', onNodePointerLeave)
+    nodeMerged.each(function (d) {
+      const g = d3.select(this)
+      const expr = d as SimExpression
+      if (g.select('text.node-label').empty()) {
+        g.append('text').attr('class', 'node-label')
+      }
+      if (g.select('circle.link-handle-zone').empty()) {
+        g.append('circle')
+          .attr('class', 'link-handle-zone')
+          .attr('cx', EXPRESSION_HANDLE_OFFSET)
+          .attr('cy', 0)
+          .attr('r', HANDLE_ZONE_R)
+          .on('pointerenter', onHandleZoneEnter)
+          .on('pointerleave', onHandleZoneLeave)
+      } else {
+        g.select<SVGCircleElement>('circle.link-handle-zone')
+          .attr('cx', EXPRESSION_HANDLE_OFFSET)
+          .attr('r', HANDLE_ZONE_R)
+          .on('pointerenter', onHandleZoneEnter)
+          .on('pointerleave', onHandleZoneLeave)
+      }
+      g.selectAll('circle.link-handle').remove()
+      let handle = g.select<SVGPolygonElement>('polygon.link-handle')
+      if (handle.empty()) {
+        handle = g
+          .append('polygon')
+          .attr('class', 'link-handle')
+          .on('pointerdown', (ev) => {
+            startLinkingRef.current(expr, ev)
+          })
+      } else {
+        handle.on('pointerdown', (ev) => {
+          startLinkingRef.current(expr, ev)
+        })
+      }
+      handle
+        .attr('points', linkHandlePoints(EXPRESSION_HANDLE_OFFSET))
+        .on('pointerenter', onHandleZoneEnter)
+        .on('pointerleave', onHandleZoneLeave)
+    })
+    nodeMerged.each(function (d) {
+      paintExpressionNodeShapes(d3.select(this), d)
+    })
+
+    for (const id of [...pinnedRef.current]) {
+      if (prev.some((p) => p.id === id) && !nextIds.has(id)) pinnedRef.current.delete(id)
+    }
+  }, [expressions.map((e) => `${e.id}:${e.expressionKind}`).join('|')])
+
+  useEffect(() => {
+    const sim = simRef.current
     const linkLayer = linkLayerRef.current
+    const linkHitLayer = linkHitLayerRef.current
     const edgeLabelLayer = edgeLabelLayerRef.current
-    if (!sim || !linkLayer || !edgeLabelLayer) return
+    if (!sim || !linkLayer || !linkHitLayer || !edgeLabelLayer) return
 
     const prev = linksRef.current
     const prevSnapshot = prev.map((l) => ({
       id: l.id,
       sourceId: l.sourceId,
       targetId: l.targetId,
-      bidirectional: l.bidirectional ?? false,
-      directionPhase: getEdgeDirectionPhase(l),
+      statementKind: getStatementKind(l),
     }))
 
     const links: SimLink[] = edges.map((e) => {
       const existing = prev.find((l) => l.id === e.id)
       if (existing) {
         existing.label = e.label
-        existing.bidirectional = e.bidirectional ?? false
         existing.sourceId = e.sourceId
         existing.targetId = e.targetId
-        existing.directionPhase = e.directionPhase ?? 0
-        existing.lineStyle = e.lineStyle
+        existing.statementKind = e.statementKind
         return existing
       }
       return {
@@ -780,38 +1394,25 @@ export function OntologyCanvas({
         targetId: e.targetId,
         source: e.sourceId,
         target: e.targetId,
-        bidirectional: e.bidirectional ?? false,
-        directionPhase: e.directionPhase ?? 0,
-        lineStyle: e.lineStyle,
+        statementKind: e.statementKind,
       }
     })
 
     assignParallelOffsets(links)
     linksRef.current = links
 
+    const resolveEndpoint = (id: string) =>
+      nodesRef.current.find((n) => n.id === id) ??
+      expressionNodesRef.current.find((n) => n.id === id)
+
     for (const link of links) {
-      link.source = nodesRef.current.find((n) => n.id === link.sourceId) ?? link.source
-      link.target = nodesRef.current.find((n) => n.id === link.targetId) ?? link.target
+      link.source = resolveEndpoint(link.sourceId) ?? link.source
+      link.target = resolveEndpoint(link.targetId) ?? link.target
     }
 
     const { anchors, loopLinks } = syncLoopAnchors(edges, nodesRef.current, anchorsRef.current)
     anchorsRef.current = anchors
     loopLinksRef.current = loopLinks
-
-    for (const link of links) {
-      if (!isSelfLink(link)) continue
-      const prevLink = prevSnapshot.find((p) => p.id === link.id)
-      if (!prevLink) continue
-      const prevPhase = prevLink.directionPhase
-      const newPhase = getEdgeDirectionPhase(link)
-      if (prevPhase === newPhase) continue
-      const shouldFlip =
-        (prevPhase === 0 && newPhase === 1) || (newPhase === 0 && prevPhase !== 0)
-      if (!shouldFlip) continue
-      const anchor = anchors.find((a) => a.edgeId === link.id)
-      const parent = link.source as SimClass
-      if (anchor && parent) flipLoopAnchorThroughParent(anchor, parent)
-    }
 
     const { anchors: labelAnchors, anchorLinks } = syncLabelAnchors(
       edges,
@@ -830,15 +1431,10 @@ export function OntologyCanvas({
       pendingLoopSpawnRef.current = null
     }
 
-    const linkForce = sim.force('link') as d3.ForceLink<SimClass, SimLink>
+    const linkForce = sim.force('link') as d3.ForceLink<StatementEndpoint, SimLink>
     const loopLinkForce = sim.force('loop') as d3.ForceLink<SimNode, SimLoopLink>
-    const labelAnchorLinkForce = sim.force('labelAnchor') as d3.ForceLink<
-      SimNode,
-      SimLabelAnchorLink
-    >
     loopLinkForce.links(loopLinks)
-    labelAnchorLinkForce.links(anchorLinks)
-    syncSimulationNodes(sim, nodesRef.current, anchors, labelAnchors, dataPropsRef.current)
+    applySimulationLayoutVisibility(sim)
 
     const prevIds = new Set(prev.map((l) => l.id))
     const changed =
@@ -847,10 +1443,9 @@ export function OntologyCanvas({
         const p = prevSnapshot.find((x) => x.id === l.id)
         if (!p) return true
         return (
-          p.bidirectional !== (l.bidirectional ?? false) ||
+          p.statementKind !== getStatementKind(l) ||
           p.sourceId !== l.sourceId ||
-          p.targetId !== l.targetId ||
-          p.directionPhase !== getEdgeDirectionPhase(l)
+          p.targetId !== l.targetId
         )
       })
 
@@ -863,27 +1458,75 @@ export function OntologyCanvas({
     linkSel.exit().remove()
 
     const linkEnter = linkSel.enter().append('g').attr('class', 'link-g')
-    linkEnter
-      .append('path')
-      .attr('class', 'link')
-      .attr('marker-end', 'url(#arrow)')
+    linkEnter.append('path').attr('class', 'link link-underlay').style('display', 'none')
+    linkEnter.append('path').attr('class', 'link')
 
-    linkSel
-      .merge(linkEnter)
-      .select('path.link')
-      .attr('class', (d) => linkPathClass(d))
-      .attr('marker-end', 'url(#arrow)')
-      .attr('marker-start', (d) => (d.bidirectional ? 'url(#arrow-start)' : null))
+    const linkMerged = linkEnter.merge(linkSel)
+    linkMerged.each(function (d) {
+      const g = d3.select(this)
+      if (g.select('path.link-underlay').empty()) {
+        g.append('path').attr('class', 'link link-underlay').style('display', 'none')
+      }
+      g.select('path.link-hit').remove()
+      const eps = statementEndpoints(d)
+      const spec = eps
+        ? getStatementRenderSpec(getStatementKind(d), eps.source.kind, eps.target.kind)
+        : null
+      g.classed('link-equiv', spec?.doubleLine ?? false)
+      g.select('path.link-underlay').style('display', spec?.doubleLine ? 'block' : 'none')
+    })
+    paintStatementLinkPaths(linkMerged)
+
+    const linkHitSel = linkHitLayer
+      .selectAll<SVGGElement, SimLink>('g.link-hit-g')
+      .data(links, (d) => d.id)
+    linkHitSel.exit().remove()
+
+    const linkHitEnter = linkHitSel.enter().append('g').attr('class', 'link-hit-g')
+    linkHitEnter.append('path').attr('class', 'link-hit')
+
+    const linkHitMerged = linkHitEnter.merge(linkHitSel)
+    linkHitMerged.on('pointerdown', (ev, d) => {
+      if (ev.button !== 0) return
+      if (shouldShowStatementCanvasLabel(getStatementKind(d))) return
+      ev.stopPropagation()
+      nodeLayerRef.current
+        ?.selectAll<SVGGElement, SimClass>('g.node')
+        .classed('selected', false)
+      expressionLayerRef.current
+        ?.selectAll<SVGGElement, SimExpression>('g.expression-node')
+        .classed('selected', false)
+      edgeLabelLayer
+        .selectAll<SVGGElement, SimLink>('g.edge-label')
+        .classed('selected', false)
+      linkLayer.selectAll<SVGGElement, SimLink>('g.link-g').classed('selected', (l) => l.id === d.id)
+      callbacksRef.current.onSelectEdge(d.id)
+    })
+    linkHitMerged.select('path.link-hit').style('display', (d) =>
+      shouldShowStatementCanvasLabel(getStatementKind(d)) ? 'none' : null,
+    )
 
     if (changed) {
       linkLayer
-        .selectAll<SVGPathElement, SimLink>('g.link-g path.link')
+        .selectAll<SVGPathElement, SimLink>('g.link-g path.link:not(.link-hit), g.link-g path.link-underlay')
+        .attr('d', (d) => linkPath(d))
+      linkHitLayer
+        .selectAll<SVGPathElement, SimLink>('g.link-hit-g path.link-hit')
+        .attr('d', (d) => linkPath(d))
+    } else {
+      linkHitLayer
+        .selectAll<SVGPathElement, SimLink>('g.link-hit-g path.link-hit')
         .attr('d', (d) => linkPath(d))
     }
 
+    const labelLinks =
+      showEdgeLabelsRef.current
+        ? links.filter((l) => shouldShowStatementCanvasLabel(getStatementKind(l)))
+        : []
+
     const labelSel = edgeLabelLayer
       .selectAll<SVGGElement, SimLink>('g.edge-label')
-      .data(links, (d) => d.id)
+      .data(labelLinks, (d) => d.id)
 
     labelSel.exit().remove()
 
@@ -897,6 +1540,9 @@ export function OntologyCanvas({
         nodeLayerRef.current
           ?.selectAll<SVGGElement, SimClass>('g.node')
           .classed('selected', false)
+        expressionLayerRef.current
+          ?.selectAll<SVGGElement, SimExpression>('g.expression-node')
+          .classed('selected', false)
         edgeLabelLayer
           .selectAll<SVGGElement, SimLink>('g.edge-label')
           .classed('selected', (l) => l.id === d.id)
@@ -906,6 +1552,9 @@ export function OntologyCanvas({
         ev.stopPropagation()
         nodeLayerRef.current
           ?.selectAll<SVGGElement, SimClass>('g.node')
+          .classed('selected', false)
+        expressionLayerRef.current
+          ?.selectAll<SVGGElement, SimExpression>('g.expression-node')
           .classed('selected', false)
         edgeLabelLayer
           .selectAll<SVGGElement, SimLink>('g.edge-label')
@@ -923,10 +1572,27 @@ export function OntologyCanvas({
 
     labelMerged.classed('draggable', (d) => isDraggableEdgeLabel(d))
 
-    labelMerged.select('text.edge-label-text').text((d) => d.label || 'Unnamed')
+    labelMerged.select('text.edge-label-text').text((d) => {
+      const edge: OntologyEdge = {
+        id: d.id,
+        sourceId: d.sourceId,
+        targetId: d.targetId,
+        label: d.label,
+        statementKind: getStatementKind(d),
+      }
+      return getStatementCanvasLabel(edge) || 'Unnamed'
+    })
 
     labelMerged.each(function (d) {
-      const size = labelSize(d.label || 'Unnamed')
+      const edge: OntologyEdge = {
+        id: d.id,
+        sourceId: d.sourceId,
+        targetId: d.targetId,
+        label: d.label,
+        statementKind: getStatementKind(d),
+      }
+      const text = getStatementCanvasLabel(edge) || 'Unnamed'
+      const size = labelSize(text)
       d3.select(this)
         .select('rect.edge-label-bg')
         .attr('x', -size.w / 2)
@@ -938,7 +1604,7 @@ export function OntologyCanvas({
     if (changed) {
       sim.alpha(Math.min(0.32, 0.14 + links.filter((l) => !prevIds.has(l.id)).length * 0.08)).restart()
     }
-  }, [edges.map((e) => `${e.id}:${e.sourceId}:${e.targetId}:${e.bidirectional ? 1 : 0}:${e.directionPhase ?? 0}:${e.lineStyle ?? 'solid'}`).join('|')])
+  }, [edges.map((e) => `${e.id}:${e.sourceId}:${e.targetId}:${e.statementKind}`).join('|'), showEdgeLabels])
 
   useEffect(() => {
     const sim = simRef.current
@@ -973,18 +1639,10 @@ export function OntologyCanvas({
       link.target = nodes.find((n) => n.propertyId === link.propertyId) ?? link.target
     }
 
-    const dataPropLinkForce = sim.force('dataPropLink') as d3.ForceLink<
-      SimNode,
-      SimDataPropertyLink
-    >
-    dataPropLinkForce.links(links)
-    syncSimulationNodes(
-      sim,
-      nodesRef.current,
-      anchorsRef.current,
-      labelAnchorsRef.current,
-      nodes,
-    )
+    applySimulationLayoutVisibility(sim)
+
+    const displayNodes = showDataPropertiesRef.current ? nodes : []
+    const displayLinks = showDataPropertiesRef.current ? links : []
 
     const changed =
       nodes.length !== prev.length ||
@@ -998,13 +1656,13 @@ export function OntologyCanvas({
 
     const linkSel = dataPropLinkLayer
       .selectAll<SVGPathElement, SimDataPropertyLink>('path.data-prop-link')
-      .data(links, (d) => d.id)
+      .data(displayLinks, (d) => d.id)
     linkSel.exit().remove()
     linkSel.enter().append('path').attr('class', 'data-prop-link')
 
     const nodeSel = dataPropNodeLayer
       .selectAll<SVGGElement, SimDataProperty>('g.data-prop-node')
-      .data(nodes, (d) => d.id)
+      .data(displayNodes, (d) => d.id)
     nodeSel.exit().remove()
 
     const selectDataPropertyClass = (d: SimDataProperty) => {
@@ -1042,7 +1700,7 @@ export function OntologyCanvas({
 
     const labelSel = dataPropLabelLayer
       .selectAll<SVGGElement, SimDataPropertyLink>('g.data-prop-edge-label')
-      .data(links, (d) => d.id)
+      .data(displayLinks, (d) => d.id)
     labelSel.exit().remove()
 
     const labelEnter = labelSel
@@ -1058,7 +1716,7 @@ export function OntologyCanvas({
       })
       .on('dblclick', (ev, d) => {
         ev.stopPropagation()
-        const prop = nodes.find((n) => n.propertyId === d.propertyId)
+        const prop = displayNodes.find((n) => n.propertyId === d.propertyId)
         if (!prop) return
         selectDataPropertyClass(prop)
         callbacksRef.current.onEditDataProperty(prop.classId, prop.propertyId, 'label')
@@ -1078,13 +1736,13 @@ export function OntologyCanvas({
       })
       .on('dblclick', (ev, d) => {
         ev.stopPropagation()
-        const prop = nodes.find((n) => n.propertyId === d.propertyId)
+        const prop = displayNodes.find((n) => n.propertyId === d.propertyId)
         if (!prop) return
         selectDataPropertyClass(prop)
         callbacksRef.current.onEditDataProperty(prop.classId, prop.propertyId, 'label')
       })
     labelMerged.each(function (d) {
-      const prop = nodes.find((n) => n.propertyId === d.propertyId)
+      const prop = displayNodes.find((n) => n.propertyId === d.propertyId)
       paintDataPropertyEdgeLabel(d3.select(this), prop?.label ?? '')
     })
   }, [
@@ -1092,7 +1750,76 @@ export function OntologyCanvas({
       .map((p) => `${p.id}:${p.classId}:${p.label}:${p.datatype}`)
       .join('|'),
     classes.map((c) => c.id).join('|'),
+    showDataProperties,
   ])
+
+  useEffect(() => {
+    const sim = simRef.current
+    if (!sim) return
+
+    applySimulationLayoutVisibility(sim)
+
+    if (visibilityLayoutPrimedRef.current) {
+      sim.alpha(0.18).restart()
+    } else {
+      visibilityLayoutPrimedRef.current = true
+    }
+  }, [showEdgeLabels, showDataProperties])
+
+  useEffect(() => {
+    if (graphLoadGeneration === 0) return
+
+    const sim = simRef.current
+    if (!sim) return
+
+    const frameId = window.requestAnimationFrame(() => {
+      startGraphLoadSettling(sim)
+    })
+
+    return () => window.cancelAnimationFrame(frameId)
+  }, [graphLoadGeneration])
+
+  useEffect(() => {
+    if (unclumpGeneration === 0) return
+
+    const sim = simRef.current
+    if (!sim) return
+
+    const unclumpInput = {
+      classes: nodesRef.current,
+      expressions: expressionNodesRef.current,
+      links: linksRef.current,
+      dataProperties: showDataPropertiesRef.current ? dataPropsRef.current : [],
+      loopAnchors: anchorsRef.current,
+      labelAnchors: showEdgeLabelsRef.current ? labelAnchorsRef.current : [],
+    }
+
+    if (computeGraphUnclumpPlan(unclumpInput).length === 0) return
+
+    pinnedRef.current.clear()
+    onUnclumpActiveChangeRef.current?.(true)
+
+    if (unclumpAnimFrameRef.current !== null) {
+      window.cancelAnimationFrame(unclumpAnimFrameRef.current)
+      unclumpAnimFrameRef.current = null
+    }
+
+    // Resolve fully off-screen, then show the result in one paint (no glide animation).
+    runHiddenUnclumpResolve(sim, unclumpInput, suppressSimRenderRef)
+    renderSimFrameRef.current?.()
+
+    const hub = findMaxGravityHub(
+      nodesRef.current,
+      expressionNodesRef.current,
+      linksRef.current,
+    )
+    onUnclumpActiveChangeRef.current?.(false)
+    startLayoutSettling(sim, 'unclump', undefined, hub)
+
+    return () => {
+      suppressSimRenderRef.current = false
+    }
+  }, [unclumpGeneration])
 
   useEffect(() => {
     const wrap = wrapRef.current
@@ -1101,7 +1828,7 @@ export function OntologyCanvas({
     if (!wrap || !sim || !svg) return
 
     const onResize = () => {
-      aimCenterForces(sim, svg)
+      aimCenterForces(sim, svg, () => linksRef.current)
       sim.alpha(0.1).restart()
     }
 
@@ -1117,16 +1844,23 @@ export function OntologyCanvas({
 
   useEffect(() => {
     const nodeLayer = nodeLayerRef.current
+    const expressionLayer = expressionLayerRef.current
+    const linkLayer = linkLayerRef.current
     const edgeLabelLayer = edgeLabelLayerRef.current
     const dataPropNodeLayer = dataPropNodeLayerRef.current
     const dataPropLabelLayer = dataPropLabelLayerRef.current
     if (!nodeLayer || !edgeLabelLayer) return
 
     const labelById = new Map(classes.map((c) => [c.id, c.label]))
-    const edgeLabelById = new Map(edges.map((e) => [e.id, e.label]))
+    const tagById = new Map(classes.map((c) => [c.id, c.tag]))
+    const expiredById = new Map(classes.map((c) => [c.id, c.expired]))
+    const colorById = new Map(classes.map((c) => [c.id, c.color]))
+    const expressionKindById = new Map(expressions.map((e) => [e.id, e.expressionKind]))
+    const edgeById = new Map(edges.map((e) => [e.id, e]))
     const dataPropById = new Map(dataProperties.map((p) => [p.id, p]))
 
     const selectedEdgeId = selection?.kind === 'edge' ? selection.id : null
+    const selectedExpressionId = selection?.kind === 'expression' ? selection.id : null
     const editingClassId = editingLabel?.kind === 'class' ? editingLabel.id : null
     const editingEdgeId = editingLabel?.kind === 'edge' ? editingLabel.id : null
     const editingDataPropId = editingDataProperty?.id ?? null
@@ -1136,28 +1870,56 @@ export function OntologyCanvas({
       .selectAll<SVGGElement, SimClass>('g.node')
       .classed('selected', (d) => selectedClassIds.has(d.id))
       .classed('editing-label', (d) => d.id === editingClassId)
+      .classed('expired', (d) => expiredById.get(d.id) ?? d.expired)
+
+    if (expressionLayer) {
+      expressionLayer
+        .selectAll<SVGGElement, SimExpression>('g.expression-node')
+        .classed('selected', (d) => d.id === selectedExpressionId)
+        .each(function (d) {
+          d.expressionKind = expressionKindById.get(d.id) ?? d.expressionKind
+        })
+
+      expressionLayer
+        .selectAll<SVGGElement, SimExpression>('g.expression-node text.node-label')
+        .text((d) => getExpressionKindLabel(d.expressionKind))
+    }
 
     nodeLayer.selectAll<SVGGElement, SimClass>('g.node').each(function (d) {
       d.label = labelById.get(d.id) ?? d.label
+      d.tag = tagById.get(d.id) ?? d.tag
+      d.expired = expiredById.get(d.id) ?? d.expired
+      d.color = colorById.get(d.id) ?? d.color
+      paintClassNodeAppearance(d3.select(this), d, {
+        selected: selectedClassIds.has(d.id),
+        editing: d.id === editingClassId,
+      })
+      paintClassNodeLabels(d3.select(this), d, editingClassId)
     })
-
-    nodeLayer
-      .selectAll<SVGGElement, SimClass>('g.node text.node-label')
-      .text((d) =>
-        d.id === editingClassId ? d.label || 'Unnamed' : truncate(d.label, 34),
-      )
 
     edgeLabelLayer
       .selectAll<SVGGElement, SimLink>('g.edge-label')
       .classed('selected', (d) => d.id === selectedEdgeId)
       .classed('editing-label', (d) => d.id === editingEdgeId)
 
+    if (linkLayer) {
+      linkLayer
+        .selectAll<SVGGElement, SimLink>('g.link-g')
+        .classed('selected', (d) => d.id === selectedEdgeId)
+    }
+
     edgeLabelLayer.selectAll<SVGGElement, SimLink>('g.edge-label').each(function (d) {
-      d.label = edgeLabelById.get(d.id) ?? d.label
-      const text = d.id === editingEdgeId ? d.label || 'Unnamed' : truncate(d.label, 24)
-      const size = labelSize(text)
+      const edge = edgeById.get(d.id)
+      if (edge) d.label = edge.label
+      const display =
+        edge && d.id === editingEdgeId
+          ? getStatementCanvasLabel(edge) || 'Unnamed'
+          : edge
+            ? truncate(getStatementCanvasLabel(edge), 24)
+            : truncate(d.label, 24)
+      const size = labelSize(display)
       const g = d3.select(this)
-      g.select('text.edge-label-text').text(text)
+      g.select('text.edge-label-text').text(display)
       g.select('rect.edge-label-bg')
         .attr('x', -size.w / 2)
         .attr('y', -size.h / 2)
@@ -1210,34 +1972,163 @@ export function OntologyCanvas({
     editingLabel,
     editingDataProperty,
     classes,
+    expressions,
     edges,
     dataProperties,
   ])
 
   return (
-    <div className="canvas-wrap" ref={wrapRef}>
+    <div
+      className={`canvas-wrap ${isGraphLoadSettling ? 'canvas-wrap-settling' : ''}`}
+      ref={wrapRef}
+    >
       <div className="canvas-toolbar">
-        <div className="canvas-hint">
-          <strong>Zoom and navigate</strong> by scrolling · <strong>Add a class</strong> by double-clicking the
-          canvas or dragging from the tool below · <strong>Connect a node</strong> by dragging its node handle
-        </div>
+        <button
+          type="button"
+          className={`canvas-hint ${hintExpanded ? 'canvas-hint-expanded' : ''}`}
+          aria-expanded={hintExpanded}
+          onClick={() => setHintExpanded((open) => !open)}
+        >
+          {hintExpanded ? (
+            <span className="canvas-hint-body">
+              <strong>Zoom and navigate</strong> by scrolling · <strong>Add a class</strong> by
+              double-clicking the canvas or dragging the circle from the tool below ·{' '}
+              <strong>Add an expression</strong> by dragging the diamond ·{' '}
+              <strong>Connect a node</strong> by dragging its node handle
+            </span>
+          ) : (
+            <span className="canvas-hint-title">How to use this tool?</span>
+          )}
+          <span className="canvas-hint-chevron" aria-hidden="true">
+            {hintExpanded ? '▴' : '▾'}
+          </span>
+        </button>
       </div>
 
-      <svg ref={svgRef} className="graph-canvas" aria-label="Ontology canvas" />
+      <div className="canvas-graph-stage" aria-hidden={isGraphLoadSettling}>
+        <svg ref={svgRef} className="graph-canvas" aria-label="Ontology canvas" />
 
-      <ClassDragTool wrapRef={wrapRef} gRootRef={gRootRef} onCreateAt={onCreateAt} />
+        <ClassDragTool
+          wrapRef={wrapRef}
+          gRootRef={gRootRef}
+          onCreateClassAt={onCreateClassAt}
+          onCreateExpressionAt={onCreateExpressionAt}
+        />
 
-      <Minimap
-        wrapRef={wrapRef}
-        svgRef={svgRef}
-        nodesRef={nodesRef}
-        zoomRef={zoomRef}
-        transformRef={transformRef}
-        gRootRef={gRootRef}
-        nodeCount={classes.length}
-      />
+        <Minimap
+          wrapRef={wrapRef}
+          svgRef={svgRef}
+          nodesRef={nodesRef}
+          expressionNodesRef={expressionNodesRef}
+          zoomRef={zoomRef}
+          transformRef={transformRef}
+          gRootRef={gRootRef}
+          nodeCount={classes.length + expressions.length}
+        />
+      </div>
+
+      {isGraphLoadSettling && (
+        <div className="canvas-load-overlay" aria-live="polite">
+          <span className="canvas-load-overlay-text">Laying out graph…</span>
+        </div>
+      )}
     </div>
   )
+}
+
+function formatClassTagCanvas(tag: string | undefined): string {
+  const trimmed = tag?.trim()
+  if (!trimmed) return ''
+  return `(${truncate(trimmed, 18)})`
+}
+
+function paintClassNodeLabels(
+  g: d3.Selection<SVGGElement, unknown, null, undefined>,
+  node: SimClass,
+  editingClassId: string | null,
+) {
+  if (g.select('text.node-tag').empty()) {
+    g.append('text').attr('class', 'node-tag')
+  }
+
+  const tagText = formatClassTagCanvas(node.tag)
+  const hasTag = tagText.length > 0
+  const nameText =
+    node.id === editingClassId ? node.label || 'Unnamed' : truncate(node.label, 34)
+
+  g.select('text.node-label').attr('dy', hasTag ? -6 : 0).text(nameText)
+  g.select('text.node-tag')
+    .attr('dy', hasTag ? 10 : 0)
+    .attr('display', hasTag ? null : 'none')
+    .text(tagText)
+}
+
+function paintClassNodeAppearance(
+  g: d3.Selection<SVGGElement, unknown, null, undefined>,
+  node: SimClass,
+  options: { selected?: boolean; editing?: boolean } = {},
+) {
+  const selected = options.selected ?? false
+  const editing = options.editing ?? false
+  const color = classColorOrDefault(node.color)
+  const halo = g.select<SVGCircleElement>('circle.selection-halo')
+  const ring = g.select<SVGCircleElement>('circle.entity-ring')
+  const core = g.select<SVGCircleElement>('circle.entity-core')
+  const label = g.select<SVGTextElement>('text.node-label')
+  const tag = g.select<SVGTextElement>('text.node-tag')
+  const ringGlow = `drop-shadow(0 0 8px ${classColorWithAlpha(color, 0.65)}) drop-shadow(0 0 18px ${classColorWithAlpha(color, 0.35)})`
+
+  halo.style('fill', null).style('stroke', null)
+  ring.style('stroke', null).style('filter', null)
+  label.style('fill', null).style('stroke', null)
+  tag.style('fill', null).style('stroke', null)
+
+  if (node.expired) {
+    core.style('fill', null).style('stroke', null)
+    if (!selected) return
+
+    ring.style('stroke', color).style('filter', `drop-shadow(0 0 8px ${classColorWithAlpha(color, 0.55)})`)
+    halo
+      .style('fill', classColorWithAlpha(color, editing ? 0.22 : 0.14))
+      .style('stroke', classColorWithAlpha(color, editing ? 0.72 : 0.5))
+    label.style('fill', null).style('stroke', color)
+    tag.style('fill', null).style('stroke', color)
+    return
+  }
+
+  core.style('fill', color).style('stroke', null)
+  ring.style('stroke', color)
+
+  if (!selected) return
+
+  ring.style('filter', ringGlow)
+  halo
+    .style('fill', classColorWithAlpha(color, editing ? 0.24 : 0.16))
+    .style('stroke', classColorWithAlpha(color, editing ? 0.75 : 0.52))
+  label.style('fill', null).style('stroke', color)
+  tag.style('fill', null).style('stroke', color)
+}
+
+function paintExpressionNodeShapes(
+  g: d3.Selection<SVGGElement, unknown, null, undefined>,
+  _d: SimExpression,
+) {
+  const layoutRect = (
+    sel: d3.Selection<SVGRectElement, unknown, null, undefined>,
+    half: number,
+  ) => {
+    sel
+      .attr('x', -half)
+      .attr('y', -half)
+      .attr('width', half * 2)
+      .attr('height', half * 2)
+      .attr('rx', EXPRESSION_CORNER_RADIUS)
+      .attr('ry', EXPRESSION_CORNER_RADIUS)
+  }
+
+  layoutRect(g.select<SVGRectElement>('rect.expression-halo'), EXPRESSION_HALO_HALF)
+  layoutRect(g.select<SVGRectElement>('rect.expression-ring'), EXPRESSION_RING_HALF)
+  layoutRect(g.select<SVGRectElement>('rect.expression-core'), EXPRESSION_CORE_HALF)
 }
 
 function paintDataPropertyTypeNode(
@@ -1291,22 +2182,55 @@ function onNodePointerLeave(this: SVGGElement, ev: PointerEvent) {
   setHandleHot(this, false)
 }
 
-function onHandleZoneEnter(this: SVGCircleElement) {
+function onHandleZoneEnter(this: Element) {
   setHandleHot(this.parentNode as SVGGElement, true)
 }
 
-function onHandleZoneLeave(this: SVGCircleElement, ev: PointerEvent) {
+function onHandleZoneLeave(this: Element, ev: PointerEvent) {
   const parent = this.parentNode as SVGGElement
   const rel = ev.relatedTarget as Node | null
   if (rel && parent.contains(rel)) return
   setHandleHot(parent, false)
 }
 
+function statementEndpoints(
+  link: SimLink,
+): { source: StatementEndpoint; target: StatementEndpoint } | null {
+  const source = link.source as StatementEndpoint | string
+  const target = link.target as StatementEndpoint | string
+  if (typeof source === 'string' || typeof target === 'string') return null
+  return { source, target }
+}
+
+function paintStatementLinkPaths(
+  linkGroups: d3.Selection<SVGGElement, SimLink, SVGGElement | null, unknown>,
+) {
+  linkGroups.selectAll<SVGPathElement, SimLink>('path.link:not(.link-hit), path.link-underlay').each(function (d) {
+    const path = d3.select(this)
+    const eps = statementEndpoints(d)
+    if (!eps) return
+    const spec = getStatementRenderSpec(getStatementKind(d), eps.source.kind, eps.target.kind)
+    const isUnderlay = path.classed('link-underlay')
+    path
+      .attr('class', isUnderlay ? 'link link-underlay' : linkPathClass(d))
+      .attr('marker-end', isUnderlay ? '' : markerUrl(spec.markerEnd, 'end') ?? '')
+      .attr('marker-start', isUnderlay ? '' : markerUrl(spec.markerStart, 'start') ?? '')
+  })
+}
+
 function linkPathClass(link: SimLink) {
   const classes = ['link']
   if (isSelfLink(link)) classes.push('link-self')
-  if (link.bidirectional) classes.push('link-bidir')
-  if (getEdgeLineStyle(link) === 'dashed') classes.push('link-dashed')
+  const eps = statementEndpoints(link)
+  if (eps) {
+    const spec = getStatementRenderSpec(
+      getStatementKind(link),
+      eps.source.kind,
+      eps.target.kind,
+    )
+    if (spec.dashed) classes.push('link-dashed')
+    if (spec.doubleLine) classes.push('link-double')
+  }
   return classes.join(' ')
 }
 
@@ -1346,6 +2270,21 @@ function labelDragTarget(
   return labelAnchors.find((a) => a.edgeId === link.id)
 }
 
+function releasePinnedExpressionNodes(
+  ids: Iterable<string>,
+  nodes: SimExpression[],
+  pinned: Set<string>,
+) {
+  for (const id of ids) {
+    const node = nodes.find((n) => n.id === id)
+    if (node) {
+      node.fx = null
+      node.fy = null
+    }
+    pinned.delete(id)
+  }
+}
+
 function releasePinnedNodes(ids: Iterable<string>, nodes: SimClass[], pinned: Set<string>) {
   for (const id of ids) {
     const node = nodes.find((n) => n.id === id)
@@ -1360,17 +2299,168 @@ function releasePinnedNodes(ids: Iterable<string>, nodes: SimClass[], pinned: Se
 function syncSimulationNodes(
   sim: d3.Simulation<SimNode, undefined>,
   classNodes: SimClass[],
+  expressionNodes: SimExpression[] = [],
   loopAnchors: SimLoopAnchor[],
   labelAnchors: SimLabelAnchor[],
   dataProps: SimDataProperty[] = [],
 ) {
-  sim.nodes([...classNodes, ...dataProps, ...loopAnchors, ...labelAnchors])
+  sim.nodes([...classNodes, ...expressionNodes, ...dataProps, ...loopAnchors, ...labelAnchors])
 }
 
-function aimCenterForces(sim: d3.Simulation<SimNode, undefined>, svg: SVGSVGElement) {
+function aimCenterForces(
+  sim: d3.Simulation<SimNode, undefined>,
+  svg: SVGSVGElement,
+  getLinks: () => SimLink[],
+) {
   const { width, height } = svg.getBoundingClientRect()
-  sim.force('x', d3.forceX(width / 2).strength(0.022))
-  sim.force('y', d3.forceY(height / 2).strength(0.022))
+  const cx = width / 2
+  const cy = height / 2
+  const strength = (d: d3.SimulationNodeDatum) =>
+    gravityStrengthForSimNode(d as SimNode, getLinks())
+  sim.force('x', d3.forceX(cx).strength(strength))
+  sim.force('y', d3.forceY(cy).strength(strength))
+}
+
+type GraphUnclumpInput = Parameters<typeof computeGraphUnclumpPlan>[0]
+
+function findMaxGravityHub(
+  classes: SimClass[],
+  expressions: SimExpression[],
+  links: SimLink[],
+): StatementEndpoint | null {
+  let best: StatementEndpoint | null = null
+  let bestStrength = -1
+  for (const node of [...classes, ...expressions]) {
+    const strength = gravityStrengthForSimNode(node, links)
+    if (strength > bestStrength) {
+      bestStrength = strength
+      best = node
+    }
+  }
+  return best
+}
+
+/** Same as click-and-hold on a hub: pin it and keep the sim warm so spokes settle. */
+function pinHubLikeDragHold(hub: StatementEndpoint) {
+  hub.vx = 0
+  hub.vy = 0
+  hub.fx = hub.x
+  hub.fy = hub.y
+}
+
+function unpinHub(hub: StatementEndpoint) {
+  hub.fx = null
+  hub.fy = null
+}
+
+function runHubHoldSettle(
+  sim: d3.Simulation<SimNode, undefined>,
+  hub: StatementEndpoint | null,
+  ticks = UNCLUMP_HUB_HOLD_TICKS,
+) {
+  if (!hub) return
+  pinHubLikeDragHold(hub)
+  sim.alphaTarget(UNCLUMP_HUB_HOLD_ALPHA_TARGET).alpha(Math.max(sim.alpha(), 0.45))
+  for (let i = 0; i < ticks; i++) sim.tick()
+  sim.alphaTarget(0)
+  unpinHub(hub)
+}
+
+/** Multi-pass radial resolve (hidden). Mutates node positions in place. */
+function runHiddenUnclumpResolve(
+  sim: d3.Simulation<SimNode, undefined>,
+  input: GraphUnclumpInput,
+  suppressSimRender: { current: boolean },
+): boolean {
+  if (computeGraphUnclumpPlan(input).length === 0) return false
+
+  suppressSimRender.current = true
+  sim.stop()
+
+  for (let pass = 0; pass < UNCLUMP_RESOLVE_PASSES; pass++) {
+    applyUnclumpPass(input)
+    sim.alpha(Math.max(sim.alpha(), 0.38))
+    for (let tick = 0; tick < UNCLUMP_SIM_TICKS_PER_PASS; tick++) sim.tick()
+  }
+
+  runHubHoldSettle(
+    sim,
+    findMaxGravityHub(input.classes, input.expressions, input.links),
+  )
+
+  suppressSimRender.current = false
+  return true
+}
+
+/**
+ * After drag: match a click/hold on the gravity hub — pin it, keep alphaTarget at 0.3,
+ * then cool. A plain click feels better because drag-start already does that for the
+ * pressed node; release used to unpin everything and settle cooler with no anchor.
+ */
+function resumeLayoutAfterDrag(
+  sim: d3.Simulation<SimNode, undefined>,
+  holdHub?: StatementEndpoint | null,
+) {
+  startLayoutSettling(sim, 'drag', undefined, holdHub)
+}
+
+let dragSettleTimer: number | null = null
+let dragSettleCoolRaf: number | null = null
+
+function finishDragSettle(
+  sim: d3.Simulation<SimNode, undefined>,
+  holdHub: StatementEndpoint | null | undefined,
+  onComplete?: () => void,
+) {
+  sim.alphaTarget(0).alpha(0)
+  if (holdHub) {
+    holdHub.vx = 0
+    holdHub.vy = 0
+    unpinHub(holdHub)
+  }
+  onComplete?.()
+}
+
+function startLayoutSettling(
+  sim: d3.Simulation<SimNode, undefined>,
+  mode: 'drag' | 'unclump',
+  onComplete?: () => void,
+  holdHub?: StatementEndpoint | null,
+) {
+  if (dragSettleTimer !== null) window.clearTimeout(dragSettleTimer)
+  if (dragSettleCoolRaf !== null) {
+    window.cancelAnimationFrame(dragSettleCoolRaf)
+    dragSettleCoolRaf = null
+  }
+  if (holdHub) pinHubLikeDragHold(holdHub)
+
+  if (mode === 'unclump') {
+    // Hub-hold physics already ran hidden; briefly accelerate, then cool to a hard stop.
+    sim.alphaTarget(0).alpha(0.7).restart()
+    dragSettleTimer = window.setTimeout(() => {
+      dragSettleTimer = null
+      finishDragSettle(sim, holdHub, onComplete)
+    }, UNCLUMP_SETTLE_MS)
+    return
+  }
+
+  // Warm settle with hub fixed (same as click/hold), then cool BEFORE unpinning —
+  // unpinning while alpha is still ~0.3 causes the end-of-settle twitch.
+  sim.alphaTarget(DRAG_SETTLE_ALPHA_TARGET).alpha(DRAG_SETTLE_ALPHA).restart()
+  dragSettleTimer = window.setTimeout(() => {
+    dragSettleTimer = null
+    sim.alphaTarget(0)
+
+    const coolThenUnpin = () => {
+      dragSettleCoolRaf = null
+      if (sim.alpha() > DRAG_SETTLE_UNPIN_ALPHA) {
+        dragSettleCoolRaf = window.requestAnimationFrame(coolThenUnpin)
+        return
+      }
+      finishDragSettle(sim, holdHub, onComplete)
+    }
+    dragSettleCoolRaf = window.requestAnimationFrame(coolThenUnpin)
+  }, DRAG_SETTLE_MS)
 }
 
 function warmLayout(sim: d3.Simulation<SimNode, undefined>, maxTicks = 400) {

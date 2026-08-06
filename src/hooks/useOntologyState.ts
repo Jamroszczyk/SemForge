@@ -1,13 +1,28 @@
 import { useCallback, useState } from 'react'
 import { nextNewClassLabel } from '../classListUtils'
+import { DEFAULT_EXPRESSION_KIND } from '../expressionUtils'
+import { iriFragmentFromLabel } from '../namedClassUtils'
+import {
+  applyStatementKindChange,
+  inferStatementKind,
+  labelForStatementKind,
+  nodeKindById,
+  swapStatementEndpoints,
+} from '../statementUtils'
 import type {
-  OntologyClass,
+  ExpressionKind,
+  ExpressionNode,
+  NamedClassNode,
   OntologyDataProperty,
   OntologyEdge,
   EditingDataProperty,
   Selection,
+  StatementKind,
 } from '../types'
-import { DEFAULT_DATATYPE, cycleEdgeDirection, edgeEndpointsForClassContext, getEdgeDirectionPhase } from '../types'
+import type { OntologyGraphDocument } from '../ontologyGraphIO'
+import { DEFAULT_DATATYPE, CLASS_COLOR } from '../types'
+
+export type NamedClassPatch = Partial<Pick<NamedClassNode, 'label' | 'tag' | 'iri' | 'comment' | 'expired' | 'color'>>
 
 function newId() {
   return crypto.randomUUID()
@@ -23,11 +38,13 @@ export type DeleteTarget =
       dataPropCount: number
     }
   | { kind: 'edge'; id: string; label: string }
+  | { kind: 'expression'; id: string; label: string }
   | { kind: 'dataProperty'; id: string; label: string }
   | { kind: 'objectProperty'; id: string; label: string }
 
 export function useOntologyState() {
-  const [classes, setClasses] = useState<OntologyClass[]>([])
+  const [classes, setClasses] = useState<NamedClassNode[]>([])
+  const [expressions, setExpressions] = useState<ExpressionNode[]>([])
   const [edges, setEdges] = useState<OntologyEdge[]>([])
   const [dataProperties, setDataProperties] = useState<OntologyDataProperty[]>([])
   const [selection, setSelection] = useState<Selection | null>(null)
@@ -37,12 +54,24 @@ export function useOntologyState() {
   const [propertyTab, setPropertyTab] = useState<'data' | 'object'>('data')
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null)
   const [hiddenClassIds, setHiddenClassIds] = useState<Set<string>>(() => new Set())
+  const [graphLoadGeneration, setGraphLoadGeneration] = useState(0)
 
   const createClassAt = useCallback((x: number, y: number) => {
     const id = newId()
     setClasses((prev) => {
       const label = nextNewClassLabel(prev.map((c) => c.label))
-      const node: OntologyClass = { id, label, x, y }
+      const node: NamedClassNode = {
+        id,
+        kind: 'namedClass',
+        label,
+        tag: '',
+        iri: iriFragmentFromLabel(label),
+        comment: '',
+        expired: false,
+        color: CLASS_COLOR,
+        x,
+        y,
+      }
       return [...prev, node]
     })
     setSelection({ kind: 'class', id })
@@ -50,36 +79,75 @@ export function useOntologyState() {
     return id
   }, [])
 
-  const createEdge = useCallback((sourceId: string, targetId: string) => {
+  const createExpressionAt = useCallback((x: number, y: number) => {
     const id = newId()
-    setEdges((prev) => [...prev, { id, sourceId, targetId, label: 'relation' }])
-    setSelection({ kind: 'edge', id })
+    const node: ExpressionNode = {
+      id,
+      kind: 'expression',
+      expressionKind: DEFAULT_EXPRESSION_KIND,
+      x,
+      y,
+    }
+    setExpressions((prev) => [...prev, node])
+    setSelection({ kind: 'expression', id })
     setSelectedClassIds(new Set())
     return id
   }, [])
 
-  const createEdgeBetween = useCallback(
+  const createEdge = useCallback(
+    (sourceId: string, targetId: string) => {
+      const id = newId()
+      const sourceKind = nodeKindById(sourceId, classes, expressions) ?? 'namedClass'
+      const targetKind = nodeKindById(targetId, classes, expressions) ?? 'namedClass'
+      const statementKind = inferStatementKind(sourceKind, targetKind)
+      setEdges((prev) => [
+        ...prev,
+        {
+          id,
+          sourceId,
+          targetId,
+          statementKind,
+          label: labelForStatementKind(statementKind),
+        },
+      ])
+      setSelection({ kind: 'edge', id })
+      setSelectedClassIds(new Set())
+      return id
+    },
+    [classes, expressions],
+  )
+
+  const createStatementBetween = useCallback(
     (
-      leftId: string,
-      rightId: string,
-      phase: 0 | 1 | 2,
-      options?: { keepClassSelection?: boolean; classId?: string; label?: string },
+      sourceId: string,
+      targetId: string,
+      statementKind: StatementKind,
+      options?: {
+        keepClassSelection?: boolean
+        classId?: string
+        keepExpressionSelection?: boolean
+        expressionId?: string
+        label?: string
+      },
     ) => {
       const id = newId()
-      const endpoints = edgeEndpointsForClassContext(leftId, rightId, phase)
-      const label = options?.label?.trim() || 'relation'
+      const label = labelForStatementKind(statementKind, options?.label)
 
       setEdges((prev) => [
         ...prev,
         {
           id,
-          ...endpoints,
+          sourceId,
+          targetId,
+          statementKind,
           label,
         },
       ])
 
       if (options?.keepClassSelection && options.classId) {
         setSelection({ kind: 'class', id: options.classId })
+      } else if (options?.keepExpressionSelection && options.expressionId) {
+        setSelection({ kind: 'expression', id: options.expressionId })
       } else {
         setSelection({ kind: 'edge', id })
         setSelectedClassIds(new Set())
@@ -89,45 +157,80 @@ export function useOntologyState() {
     [],
   )
 
-  const updateClassLabel = useCallback((id: string, label: string) => {
-    setClasses((prev) => prev.map((c) => (c.id === id ? { ...c, label } : c)))
+  const updateNamedClass = useCallback((id: string, patch: NamedClassPatch) => {
+    setClasses((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)))
+  }, [])
+
+  const updateClassLabel = useCallback(
+    (id: string, label: string) => {
+      updateNamedClass(id, { label })
+    },
+    [updateNamedClass],
+  )
+
+  const updateExpressionKind = useCallback((id: string, expressionKind: ExpressionKind) => {
+    setExpressions((prev) =>
+      prev.map((e) => (e.id === id ? { ...e, expressionKind } : e)),
+    )
   }, [])
 
   const updateEdgeLabel = useCallback((id: string, label: string) => {
     setEdges((prev) => prev.map((e) => (e.id === id ? { ...e, label } : e)))
   }, [])
 
-  const updateEdgeLineStyle = useCallback((id: string, lineStyle: 'solid' | 'dashed') => {
-    setEdges((prev) => prev.map((e) => (e.id === id ? { ...e, lineStyle } : e)))
-  }, [])
-
-  const cycleEdgeDirectionById = useCallback((id: string) => {
+  const updateStatementKind = useCallback((id: string, statementKind: StatementKind) => {
     setEdges((prev) =>
-      prev.map((e) => (e.id === id ? cycleEdgeDirection(e) : e)),
+      prev.map((e) => (e.id === id ? applyStatementKindChange(e, statementKind) : e)),
     )
   }, [])
 
-  const updateEdgeOtherClass = useCallback(
-    (edgeId: string, classId: string, newOtherId: string) => {
+  const swapStatementEndpointsById = useCallback((id: string) => {
+    setEdges((prev) => prev.map((e) => (e.id === id ? swapStatementEndpoints(e) : e)))
+  }, [])
+
+  const updateStatementEndpoint = useCallback(
+    (edgeId: string, endpoint: 'source' | 'target', nodeId: string) => {
       setEdges((prev) =>
         prev.map((edge) => {
           if (edge.id !== edgeId) return edge
-          const phase = getEdgeDirectionPhase(edge)
-          return {
-            ...edge,
-            ...edgeEndpointsForClassContext(classId, newOtherId, phase),
+          if (endpoint === 'source') {
+            if (edge.sourceId === nodeId) return edge
+            return { ...edge, sourceId: nodeId }
           }
+          if (edge.targetId === nodeId) return edge
+          return { ...edge, targetId: nodeId }
         }),
       )
     },
     [],
   )
 
-  const commitClassLabel = useCallback((id: string) => {
+  const updateEdgeOtherClass = useCallback(
+    (edgeId: string, anchorClassId: string, newOtherId: string) => {
+      setEdges((prev) =>
+        prev.map((edge) => {
+          if (edge.id !== edgeId) return edge
+          if (edge.sourceId === anchorClassId) {
+            return { ...edge, targetId: newOtherId }
+          }
+          if (edge.targetId === anchorClassId) {
+            return { ...edge, sourceId: newOtherId }
+          }
+          return edge
+        }),
+      )
+    },
+    [],
+  )
+
+  const commitNamedClass = useCallback((id: string) => {
     setClasses((prev) =>
-      prev.map((c) =>
-        c.id === id ? { ...c, label: c.label.trim() || 'Unnamed' } : c,
-      ),
+      prev.map((c) => {
+        if (c.id !== id) return c
+        const label = c.label.trim() || 'Unnamed'
+        const iri = c.iri.trim() || iriFragmentFromLabel(label)
+        return { ...c, label, iri, tag: c.tag.trim(), comment: c.comment.trim() }
+      }),
     )
   }, [])
 
@@ -174,6 +277,13 @@ export function useOntologyState() {
     [deleteClasses],
   )
 
+  const deleteExpression = useCallback((id: string) => {
+    setExpressions((prev) => prev.filter((e) => e.id !== id))
+    setEdges((prev) => prev.filter((e) => e.sourceId !== id && e.targetId !== id))
+    setSelection((cur) => (cur?.kind === 'expression' && cur.id === id ? null : cur))
+    setDeleteTarget(null)
+  }, [])
+
   const deleteEdge = useCallback((id: string) => {
     setEdges((prev) => prev.filter((e) => e.id !== id))
     setSelection((cur) => (cur?.kind === 'edge' && cur.id === id ? null : cur))
@@ -209,6 +319,11 @@ export function useOntologyState() {
 
       return next
     })
+  }, [])
+
+  const selectExpression = useCallback((id: string) => {
+    setSelection({ kind: 'expression', id })
+    setSelectedClassIds(new Set())
   }, [])
 
   const selectEdge = useCallback((id: string) => {
@@ -248,6 +363,20 @@ export function useOntologyState() {
       else next.add(id)
       return next
     })
+  }, [])
+
+  const loadGraph = useCallback((doc: OntologyGraphDocument) => {
+    setClasses(doc.classes)
+    setExpressions(doc.expressions)
+    setEdges(doc.edges)
+    setDataProperties(doc.dataProperties)
+    setHiddenClassIds(new Set(doc.hiddenClassIds))
+    setSelection(null)
+    setSelectedClassIds(new Set())
+    setEditingLabel(null)
+    setEditingDataProperty(null)
+    setDeleteTarget(null)
+    setGraphLoadGeneration((n) => n + 1)
   }, [])
 
   const addDataProperty = useCallback((classId: string) => {
@@ -299,11 +428,17 @@ export function useOntologyState() {
   const selectedClass =
     selection?.kind === 'class' ? classes.find((c) => c.id === selection.id) ?? null : null
 
+  const selectedExpression =
+    selection?.kind === 'expression'
+      ? expressions.find((e) => e.id === selection.id) ?? null
+      : null
+
   const selectedEdge =
     selection?.kind === 'edge' ? edges.find((e) => e.id === selection.id) ?? null : null
 
   return {
     classes,
+    expressions,
     edges,
     dataProperties,
     selection,
@@ -314,25 +449,32 @@ export function useOntologyState() {
     deleteTarget,
     hiddenClassIds,
     selectedClass,
+    selectedExpression,
     selectedEdge,
     createClassAt,
+    createExpressionAt,
     createEdge,
-    createEdgeBetween,
+    createStatementBetween,
+    updateNamedClass,
     updateClassLabel,
+    updateExpressionKind,
     updateEdgeLabel,
-    updateEdgeLineStyle,
-    cycleEdgeDirectionById,
+    updateStatementKind,
+    swapStatementEndpointsById,
+    updateStatementEndpoint,
     updateEdgeOtherClass,
-    commitClassLabel,
+    commitNamedClass,
     commitEdgeLabel,
     deleteClass,
     deleteClasses,
+    deleteExpression,
     deleteEdge,
     addDataProperty,
     updateDataProperty,
     removeDataProperty,
     commitDataProperty,
     selectClass,
+    selectExpression,
     selectEdge,
     deselectClass,
     clearSelection,
@@ -342,5 +484,7 @@ export function useOntologyState() {
     requestDelete,
     cancelDelete,
     toggleClassVisibility,
+    loadGraph,
+    graphLoadGeneration,
   }
 }

@@ -23,7 +23,7 @@ import {
   DEFAULT_DATATYPE,
   shortDatatype,
 } from './types'
-import { incidentEdgeHazards, isSelfLink, linkLabelPos } from './graphGeometry'
+import { incidentEdgeHazards, isSelfLink, linkLabelPos, statementEndpointLayoutRadius } from './graphGeometry'
 
 const TYPE_PAD_X = 14
 const LABEL_PAD_X = 12
@@ -179,13 +179,53 @@ export function dataPropertyLinkPath(classNode: SimClass, prop: SimDataProperty)
   return `M${sx + (dx / len) * trimS},${sy + (dy / len) * trimS}L${tx - (dx / len) * trimT},${ty - (dy / len) * trimT}`
 }
 
+function classBorderPointToward(classNode: SimClass, tx: number, ty: number, additionalDistance = 0) {
+  const sx = classNode.x ?? 0
+  const sy = classNode.y ?? 0
+  const dx = tx - sx
+  const dy = ty - sy
+  const len = Math.hypot(dx, dy)
+  if (len === 0) return { x: sx, y: sy }
+  const borderReach = statementEndpointLayoutRadius(classNode) + additionalDistance
+  const ratio = (len - borderReach) / len
+  return { x: sx + dx * ratio, y: sy + dy * ratio }
+}
+
+function dataPropertyBorderPointToward(
+  prop: SimDataProperty,
+  fx: number,
+  fy: number,
+  additionalDistance = 0,
+) {
+  const px = prop.x ?? 0
+  const py = prop.y ?? 0
+  const dx = fx - px
+  const dy = fy - py
+  const len = Math.hypot(dx, dy)
+  if (len === 0) return { x: px, y: py }
+  const hw = (prop._boxWidth ?? DATA_PROPERTY_MIN_WIDTH) / 2
+  const hh = DATA_PROPERTY_HEIGHT / 2
+  const angle = Math.atan2(dy, dx)
+  const borderReach =
+    Math.min(
+      hw / Math.max(Math.abs(Math.cos(angle)), 1e-6),
+      hh / Math.max(Math.abs(Math.sin(angle)), 1e-6),
+    ) + additionalDistance
+  const ratio = (len - borderReach) / len
+  return { x: px + dx * ratio, y: py + dy * ratio }
+}
+
 export function dataPropertyLinkLabelPos(classNode: SimClass, prop: SimDataProperty) {
   const sx = classNode.x ?? 0
   const sy = classNode.y ?? 0
   const tx = prop.x ?? 0
   const ty = prop.y ?? 0
-  const t = prop._labelT ?? 0.48
-  return { x: sx + (tx - sx) * t, y: sy + (ty - sy) * t }
+  const nearClass = classBorderPointToward(classNode, tx, ty)
+  const nearProp = dataPropertyBorderPointToward(prop, sx, sy)
+  return {
+    x: (nearClass.x + nearProp.x) / 2,
+    y: (nearClass.y + nearProp.y) / 2,
+  }
 }
 
 export function dataPropertyTypeNodeLayout(datatype: string, editing = false) {
@@ -353,7 +393,8 @@ export function forceDataPropertyAvoidance(
     const labelByEdge = new Map(labelAnchors.map((a) => [a.edgeId, a]))
     const loopByEdge = new Map(loopAnchors.map((a) => [a.edgeId, a]))
 
-    const edgeLabelBoxes: RectBox[] = links.map((link) => edgeLabelBox(link))
+    const edgeLabelBoxes: RectBox[] =
+      labelAnchors.length > 0 ? links.map((link) => edgeLabelBox(link)) : []
 
     const globalHazards: Array<{ x: number; y: number; r: number }> = []
     for (const link of links) {
