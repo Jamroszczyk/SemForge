@@ -285,9 +285,11 @@ export const NODE_LINK_HAZARD_OFFSET = Math.round(36 * CANVAS_LAYOUT_SCALE)
 export const CHARGE_CLASS = Math.round(-500 * CANVAS_LAYOUT_SCALE)
 /** Isolated (no edges) nodes: weak charge so the graph doesn't blast them away. */
 export const ISOLATED_CHARGE_SCALE = 0.14
-/** Soft spring onto a ring just outside the connected graph. */
-export const ISOLATED_PARK_STRENGTH = 0.55
+/** Soft reel-in when a free node drifts past the outer ring (never flings outward). */
+export const ISOLATED_PARK_STRENGTH = 0.28
 export const ISOLATED_PARK_MARGIN = Math.round(120 * CANVAS_LAYOUT_SCALE)
+/** Dampen free-node drift while still inside the graph (stay near drop point). */
+export const ISOLATED_INNER_DAMPING = 0.12
 /** WebVOWL applies 0.8× charge to label nodes; expressions sit between class and label. */
 export const CHARGE_EXPRESSION = Math.round(-400 * CANVAS_LAYOUT_SCALE)
 export const CHARGE_DATA_PROPERTY = Math.round(-135 * CANVAS_LAYOUT_SCALE)

@@ -30,6 +30,7 @@ import {
   CHARGE_CLASS,
   CHARGE_EXPRESSION,
   ISOLATED_CHARGE_SCALE,
+  ISOLATED_INNER_DAMPING,
   ISOLATED_PARK_MARGIN,
   ISOLATED_PARK_STRENGTH,
   LINK_COMPRESSION_RESTORE_STRENGTH,
@@ -775,14 +776,15 @@ export function chargeStrengthForSimNode(node: SimNode, links: SimLink[]) {
 }
 
 /**
- * Park free (degree-0) nodes on a soft ring just outside the connected graph,
- * in the direction they already sit — keeps new nodes editable until linked.
+ * Free (degree-0) nodes: stay near where the user dropped them inside the graph.
+ * Only gently reel back if charge blasts them past an outer ring — never fling outward.
  */
 export function forceIsolatedNodePark(
   getStatementNodes: () => StatementEndpoint[],
   getLinks: () => SimLink[],
   strength = ISOLATED_PARK_STRENGTH,
   margin = ISOLATED_PARK_MARGIN,
+  innerDamping = ISOLATED_INNER_DAMPING,
 ) {
   function force(alpha: number) {
     const links = getLinks()
@@ -798,7 +800,7 @@ export function forceIsolatedNodePark(
 
     let cx = 0
     let cy = 0
-    let parkR = LINK_DISTANCE * 0.9
+    let parkR = LINK_DISTANCE * 1.4
 
     if (connected.length > 0) {
       for (const node of connected) {
@@ -811,7 +813,8 @@ export function forceIsolatedNodePark(
       for (const node of connected) {
         maxR = Math.max(maxR, Math.hypot((node.x ?? 0) - cx, (node.y ?? 0) - cy))
       }
-      parkR = Math.max(maxR + margin, LINK_DISTANCE * 0.9)
+      // Generous outer leash — only for nodes that flew away, not a target to seek.
+      parkR = Math.max(maxR + margin * 1.6, LINK_DISTANCE * 1.4)
     }
 
     for (const node of isolated) {
@@ -821,17 +824,20 @@ export function forceIsolatedNodePark(
       let dx = x - cx
       let dy = y - cy
       let dist = Math.hypot(dx, dy)
-      if (dist < 1e-3) {
-        const dir = fallbackLinkDirection(node, node)
-        dx = dir.x
-        dy = dir.y
-        dist = 1
+
+      if (dist <= parkR) {
+        // Inside the working area: damp drift, do not pull toward the ring.
+        const damp = 1 - innerDamping * alpha
+        node.vx! *= damp
+        node.vy! *= damp
+        continue
       }
+
+      if (dist < 1e-3) continue
       const tx = cx + (dx / dist) * parkR
       const ty = cy + (dy / dist) * parkR
-      // Stronger pull when blasted far past the ring; gentle when near placement.
-      const overshoot = Math.max(0, dist - parkR) / Math.max(parkR, 1)
-      const pull = strength * (0.55 + Math.min(overshoot, 2) * 0.45)
+      const overshoot = (dist - parkR) / Math.max(parkR, 1)
+      const pull = strength * Math.min(overshoot, 1.2)
       node.vx! += (tx - x) * pull * alpha
       node.vy! += (ty - y) * pull * alpha
     }

@@ -68,6 +68,7 @@ import {
   computeDynamicSiblingRanks,
   dataPropertyLinkDistance,
   chargeStrengthForSimNode,
+  countStatementDegree,
   forceHubSpokeSpread,
   forceIsolatedNodePark,
   forceLoopEdgeAvoidance,
@@ -238,6 +239,8 @@ export function OntologyCanvas({
   const dataPropsRef = useRef<SimDataProperty[]>([])
   const dataPropLinksRef = useRef<SimDataPropertyLink[]>([])
   const pinnedRef = useRef<Set<string>>(new Set())
+  /** Free nodes held at drop position until linked or manually dragged. */
+  const placementPinnedRef = useRef<Set<string>>(new Set())
   const dragRef = useRef<d3.DragBehavior<SVGGElement, SimClass, SimClass | d3.SubjectPosition> | null>(null)
   const expressionDragRef = useRef<
     d3.DragBehavior<SVGGElement, SimExpression, SimExpression | d3.SubjectPosition> | null
@@ -261,6 +264,7 @@ export function OntologyCanvas({
     if (graphLoadGeneration > 0) {
       warmedRef.current = true
       pinnedRef.current.clear()
+      placementPinnedRef.current.clear()
     }
   }
   const linkingRef = useRef<{ source: StatementEndpoint; pointerId: number } | null>(null)
@@ -684,6 +688,7 @@ export function OntologyCanvas({
         if (!ev.active) simRef.current?.alphaTarget(0)
         d.fx = null
         d.fy = null
+        placementPinnedRef.current.delete(d.id)
         if (simRef.current) {
           resumeLayoutAfterDrag(
             simRef.current,
@@ -713,6 +718,7 @@ export function OntologyCanvas({
         if (!ev.active) simRef.current?.alphaTarget(0)
         d.fx = null
         d.fy = null
+        placementPinnedRef.current.delete(d.id)
         if (simRef.current) {
           resumeLayoutAfterDrag(
             simRef.current,
@@ -1057,7 +1063,9 @@ export function OntologyCanvas({
           pinnedRef.current.add(c.id)
           nodes.push({ ...c, x, y, fx: x, fy: y, vx: 0, vy: 0 })
         } else {
-          nodes.push({ ...c, x, y, vx: 0, vy: 0 })
+          // Hold at drop point so users can connect before physics moves it.
+          placementPinnedRef.current.add(c.id)
+          nodes.push({ ...c, x, y, fx: x, fy: y, vx: 0, vy: 0 })
         }
         newNodeIds.push(c.id)
         changed = true
@@ -1190,6 +1198,9 @@ export function OntologyCanvas({
     for (const id of [...pinnedRef.current]) {
       if (prev.some((p) => p.id === id) && !nextIds.has(id)) pinnedRef.current.delete(id)
     }
+    for (const id of [...placementPinnedRef.current]) {
+      if (!nextIds.has(id)) placementPinnedRef.current.delete(id)
+    }
   }, [classes.map((c) => c.id).join('|')])
 
   useEffect(() => {
@@ -1228,7 +1239,8 @@ export function OntologyCanvas({
           pinnedRef.current.add(e.id)
           nodes.push({ ...e, x, y, fx: x, fy: y, vx: 0, vy: 0 })
         } else {
-          nodes.push({ ...e, x, y, vx: 0, vy: 0 })
+          placementPinnedRef.current.add(e.id)
+          nodes.push({ ...e, x, y, fx: x, fy: y, vx: 0, vy: 0 })
         }
         newNodeIds.push(e.id)
         changed = true
@@ -1361,6 +1373,9 @@ export function OntologyCanvas({
     for (const id of [...pinnedRef.current]) {
       if (prev.some((p) => p.id === id) && !nextIds.has(id)) pinnedRef.current.delete(id)
     }
+    for (const id of [...placementPinnedRef.current]) {
+      if (!nextIds.has(id)) placementPinnedRef.current.delete(id)
+    }
   }, [expressions.map((e) => `${e.id}:${e.expressionKind}`).join('|')])
 
   useEffect(() => {
@@ -1408,6 +1423,17 @@ export function OntologyCanvas({
     for (const link of links) {
       link.source = resolveEndpoint(link.sourceId) ?? link.source
       link.target = resolveEndpoint(link.targetId) ?? link.target
+    }
+
+    // Once a dropped free node is connected, let normal layout take over.
+    for (const id of [...placementPinnedRef.current]) {
+      if (countStatementDegree(id, links) === 0) continue
+      const node = resolveEndpoint(id)
+      if (node) {
+        node.fx = null
+        node.fy = null
+      }
+      placementPinnedRef.current.delete(id)
     }
 
     const { anchors, loopLinks } = syncLoopAnchors(edges, nodesRef.current, anchorsRef.current)
