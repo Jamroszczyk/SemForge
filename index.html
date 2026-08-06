@@ -9,10 +9,12 @@
     <title>Ontology Canvas</title>
     <script>
       try {
-        if (localStorage.getItem('semforge_theme') === 'light') {
+        if (localStorage.getItem('semforge_theme') !== 'dark') {
           document.documentElement.setAttribute('data-theme', 'light')
         }
-      } catch (_) {}
+      } catch (_) {
+        document.documentElement.setAttribute('data-theme', 'light')
+      }
     </script>
   </head>
   <body>

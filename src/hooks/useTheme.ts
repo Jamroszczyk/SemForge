@@ -6,9 +6,11 @@ const THEME_KEY = 'semforge_theme'
 
 function readStoredTheme(): Theme {
   try {
-    return localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark'
+    const stored = localStorage.getItem(THEME_KEY)
+    if (stored === 'dark') return 'dark'
+    return 'light'
   } catch {
-    return 'dark'
+    return 'light'
   }
 }
 
