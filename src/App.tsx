@@ -555,15 +555,16 @@ function App() {
           />
           <button
             type="button"
-            className="btn btn-ghost btn-xs topbar-unclump-btn"
+            className="btn btn-ghost btn-icon"
             disabled={unclumpActive}
             onClick={() => {
               if (unclumpActive) return
               setUnclumpGeneration((n) => n + 1)
             }}
-            title="Pull leaf nodes outward and re-settle the layout"
+            aria-label="Untangle Graph"
+            title="Untangle Graph"
           >
-            Unclump
+            <img src="/untangle.svg" alt="" className="topbar-transfer-icon" width={18} height={18} />
           </button>
           <GraphTransferButtons onDownload={handleDownloadGraph} onUpload={handleUploadGraph} />
           <ThemeToggle theme={theme} onToggle={toggleTheme} />

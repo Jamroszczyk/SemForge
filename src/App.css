@@ -31,16 +31,6 @@
   border-right: 1px solid var(--topbar-border);
 }
 
-.topbar-unclump-btn {
-  margin-right: 2px;
-  white-space: nowrap;
-}
-
-.topbar-unclump-btn:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
 .topbar-view-toggle {
   display: inline-flex;
   align-items: center;
